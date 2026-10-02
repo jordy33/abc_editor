@@ -1,0 +1,12 @@
+# The editor runs on the Python standard library alone.
+# Nothing here is required at runtime; these are only for the test suite.
+#
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r requirements.txt
+#
+# If you only want to use the editor, you can skip this file entirely —
+# server.py imports nothing outside the standard library.
+
+# Browser integration test (tests/browser_check.py) drives headless Chrome
+# over the DevTools protocol.
+websocket-client>=1.7.0

@@ -1,0 +1,88 @@
+/* Editor styles, taken from the ComfyUI node's injected stylesheet.
+   The node-specific rules (fixed sizing, canvas affordances) are dropped and
+   replaced with normal page layout. */
+
+:root { color-scheme: dark; }
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background: #1c0028;
+    color: #f5edf8;
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.topbar {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    flex-wrap: wrap;
+    padding: 12px 16px;
+    border-bottom: 1px solid #16727c;
+    background: #29003d;
+}
+
+.topbar h1 { font-size: 15px; margin: 0; letter-spacing: .2px; }
+.topbar .hint { color: #d5bfdf; font-size: 12px; }
+.topbar code, .bottombar code { background: #3d1256; padding: 1px 4px; border-radius: 3px; }
+
+main { flex: 1; min-height: 0; }
+
+.bottombar {
+    padding: 10px 16px;
+    border-top: 1px solid #43305c;
+    color: #b79ecb;
+    font-size: 12px;
+    background: #21002f;
+}
+
+/* The editor root must not clip the expanded overlay. */
+#editor { display: block; }
+
+.fl-yue2-editor {
+    height: 100%;
+    padding: 12px;
+    background: #29003d;
+    color: #f5edf8;
+    font: 13px system-ui;
+    border: 1px solid #16727c;
+    border-radius: 8px;
+}
+.fl-yue2-content { display: flow-root; }
+.fl-yue2-editor * { box-sizing: border-box; }
+.fl-yue2-editor .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.fl-yue2-editor label { display: flex; align-items: center; gap: 5px; }
+.fl-yue2-editor input, .fl-yue2-editor select, .fl-yue2-editor textarea {
+    background: #180024; color: white; border: 1px solid #765287; border-radius: 5px; padding: 7px; min-width: 0;
+}
+.fl-yue2-editor input[type=number] { width: 70px; }
+.fl-yue2-editor button { background: #16727c; color: white; border: 0; border-radius: 5px; padding: 8px 11px; cursor: pointer; }
+.fl-yue2-editor button.secondary { background: #553064; }
+.fl-yue2-editor button:disabled { opacity: .4; cursor: default; }
+.fl-yue2-editor .status { padding: 8px; border-left: 3px solid #52cfb1; margin: 8px 0; }
+.fl-yue2-editor .status.error { border-color: #ff9292; color: #ffbcbc; }
+.fl-yue2-editor .help { font-size: 12px; color: #d5bfdf; line-height: 1.5; margin: 8px 0; }
+.fl-yue2-editor .roll { overflow-x: auto; border: 1px solid #715084; border-radius: 6px; overscroll-behavior: contain; }
+.fl-yue2-editor svg { display: block; touch-action: none; user-select: none; }
+.fl-yue2-editor textarea { width: 100%; min-height: 430px; font: 13px monospace; }
+.fl-yue2-editor [hidden] { display: none !important; }
+.fl-yue2-editor .chords { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 0; }
+.fl-yue2-editor .chords label { flex-direction: column; font-size: 11px; }
+.fl-yue2-editor .chords select { max-width: 130px; }
+
+/* Expanded mode: an overlay instead of reparenting into document.body. */
+.fl-yue2-editor.fl-yue2-expanded {
+    position: fixed;
+    inset: 3vh 3vw;
+    width: 94vw;
+    height: 94vh;
+    overflow: auto;
+    z-index: 10000;
+    box-shadow: 0 0 0 4vh #0009;
+    border-radius: 8px;
+}
+body.expanded-open { overflow: hidden; }
