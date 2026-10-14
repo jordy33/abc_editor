@@ -104,11 +104,14 @@ python3 -m venv .venv
 | Scrub | Drag the timeline or the playhead |
 | Undo / redo | <kbd>⌘</kbd>+<kbd>Z</kbd> / <kbd>⌘</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> |
 | Hear a pitch | Click a piano key, or drag a note (auditions as you change pitch) |
+| Hear a chord | Click a chord name in the **`Chords…`** modal |
+| Edit chords | **`Chords…`** on the toolbar opens the chord modal |
+| Hear chords in playback | **Harmony** checkbox on the toolbar |
 | Expand | **Expand / close** for a near-fullscreen editor; <kbd>Esc</kbd> exits |
 
 **Also available:** tempo, key transposition, snap values, the
 **Instrumental / Sung melody** switch, per-section arrangement
-(add / duplicate / reorder / remove, add bars), the **Harmony** chord lane
+(add / duplicate / reorder / remove, add bars), the **`Chords…`** editor
 (see [Seeing and editing the harmony](#seeing-and-editing-the-harmony)),
 **Center notes**, **Instrumental only**, **Clear melody**, **New blank score**,
 and **Advanced ABC** for raw text editing.
@@ -297,65 +300,152 @@ usual starting point.
 
 ### Seeing and editing the harmony
 
-The chord panel is easy to miss, because it starts **collapsed**. Below the
-piano roll there are two `▸` disclosure triangles:
+Chords live in a **strip above the timeline** — one button per bar, each as wide
+as the bar it belongs to, so the progression lines up with the grid below:
 
 ```
-Section: [ 1. intro ▼ ]   Melody: [ Instrumental ▼ ]   ...
+ Section: [ 1. intro ▼ ]   Melody: [ Instrumental ▼ ]    ...    [ Chords… ]
 
-  ▸ Arrange sections
-  ▸ Harmony (optional)     ← click this one
+ ♫ │ 1  │ 2  │ 3    │ 4        │ 5    │ 6  │ 7  │ 8  │ 9  │ 10     │
+   │ —  │ —  │ C#m  │ C#m F#m  │ F#m  │ B  │ E  │ A  │ E  │ F#m B  │
+ └───────────────────────────────────────────────────────────────────────
+   Bar 1                    Bar 3      Bar 4                     Bar 10
 ```
 
-Click **Harmony (optional)** to open it. Each bar of the *current section* gets
-a card:
+The button shows the bar number and the chord, or `—` when the bar has none. A
+bar that changes chord mid-way shows both (`C#m F#m`). Hover for the full
+detail.
+
+**Click a bar button** to edit just that bar:
 
 ```
-┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
-│ Bar 11          │  │ Bar 12          │  │ Bar 13          │
-│ C#m             │  │ A               │  │ E               │
-│ Root: [C#  ▼]   │  │ Root: [A   ▼]   │  │ Root: [E   ▼]   │
-│ Type: [m   ▼]   │  │ Type: [    ▼]   │  │ Type: [    ▼]   │
-└─────────────────┘  └─────────────────┘  └─────────────────┘
+ Bar 7        Section intro · 4/4 · 4 beats     [◀] 7 / 10 [▶]  [Whole section]  [Close]
+ ─────────────────────────────────────────────────────────────────────────────────────
+ Bar 7   ┌ beat 1  ┐ ┌ beat 2  ┐ ┌ beat 3  ┐ ┌ beat 4  ┐
+         │   E     │ │   +     │ │   +     │ │   +     │
+         │[E][ ][→] │ │[—][ ][→]│ │[—][ ][→]│ │[—][ ][→]│
+         └─────────┘ └─────────┘ └─────────┘ └─────────┘
+ —————————————————————————————————————————————————————————————————————————————————————
+ Click a chord name to hear it. Edits save as you make them.      [Clear bar 7]
 ```
 
-- **Root** — `C C# Db D Eb E F F# G Ab A Bb B`. Choosing `—` **deletes** the
-  chord for that bar.
+**`Chords…` on the toolbar** opens the same editor for the **whole section** at
+once, when you want to see the progression as a whole.
+
+Each beat cell holds three pickers and a clear button:
+
+- **Root** — `C C# Db D Eb E F F# G Ab A Bb B`. Choosing `—` removes the chord.
 - **Type** — `(blank)` = major, `m`, `dim`, `aug`, `7`, `maj7`, `m7`, `dim7`,
   `m7b5`, `sus4`, `sus2`, `6`, `m6`, `7sus4`, `m(maj7)`.
+- **`→ n`** — move this chord to another beat of the same bar.
+- **`−`** — clear just this beat.
 
-Every change is validated and written straight back into the ABC text.
+**Adding a chord:** click the dashed `+` on any empty beat. It places a `C` there,
+which you then change with the pickers.
+
+**Hearing a chord:** click its name in the cell.
+
+**Moving between bars:** `◀` / `▶` step one bar at a time (or the arrow keys),
+so you can walk a progression without closing and reopening. **Whole section**
+switches back to the full list and **One bar** returns.
+
+**The strip updates as you edit**, so you can watch the progression build up.
+
+Close with **Close**, <kbd>Esc</kbd>, or by clicking outside the modal.
+
+#### Why a modal, and not a panel in the page
+
+Every chord edit re-validates the score and rebuilds the piano roll. An inline
+panel was part of that rebuilt tree, so it was destroyed and recreated on each
+change — and because it sat at the bottom of a long page, the browser reset the
+scroll and threw you back to the top, losing your place mid-edit.
+
+The modal lives outside that tree. It keeps its own scroll position, survives
+re-renders, and updates only its own numbers. Verified behaviour: editing a
+chord with the modal scrolled to 300px leaves it at 300px.
 
 **Change `Type` before `Root`.** If you want a completely different chord, set
 the quality first and the root second. The two dropdowns are wired so that each
 one re-reads the other's current value, and setting the type first makes the
 final symbol unambiguous.
 
-At the bottom of the panel, **Remove chords (free harmony)** clears every chord
-and lets YuE2 harmonise from the style prompt alone.
+To confirm an edit landed, look at the **strip above the timeline** — it
+refreshes immediately — or switch to **Advanced ABC** and read the `Vocal` line,
+where the chord symbol in quotes is authoritative.
 
-**After changing a chord, switch section and back to refresh the cards.** The
-edit is saved immediately — the ABC text and the score data both update — but
-the card's own label is not redrawn until the panel is rebuilt, which happens
-when you change the `Section` or `Melody` dropdown. Until then a card can show
-the old symbol while the score already holds the new one.
+### Hearing the chords
 
-To confirm an edit landed, check the **status line** or switch to **Advanced
-ABC** and look at the `Vocal` line: the chord symbol in quotes is authoritative.
+You can check a progression by ear without leaving the editor.
 
-### Things to know about the Harmony panel
+**Click a chord name to hear it.** The chord shown in each beat cell is a
+button: clicking it plays that chord's voicing on its own, about a second long,
+so you can compare two candidates on the spot. This is the fastest way to decide
+between, say, `E` and `Emaj7`.
 
-- **It follows the selected section.** Open it on `intro` and you see 10 cards;
-  switch to `chorus` and you see 16. There is no whole-song view of the chords
-  in the panel — use the `Section` dropdown to move around. Note that this is
-  the same section selector that controls the grid, so changing it changes both.
-- **Chords stay in the score even while the panel is collapsed.** Collapsing it
-  is purely visual.
-- **Mid-bar chord changes are preserved but not editable here.** A chord that
-  changes on beat 3 rather than beat 1 survives a round-trip through the editor,
-  but the per-bar cards can only represent one chord per bar. When the score
-  contains any, the panel says so and points you at **Advanced ABC**.
-- **You do not need to close the panel** before editing notes, or vice versa.
+**Use the `Harmony` checkbox for playback.** On the toolbar next to `Metronome`:
+
+| `Harmony` | What `Play` sounds |
+| --- | --- |
+| **on** (default) | The selected melody **and** the chords |
+| off | The melody alone |
+
+Toggling it while playing restarts playback with the new setting.
+
+Two things to know about how the chords sound:
+
+- **They play whichever voice you are viewing.** The accompaniment belongs to
+  the song, not to one lane: switch `Melody` between `Instrumental` and `Sung
+  melody` and the chords keep playing either way. This matters most in an
+  instrumental intro, where the melodic content sits in `Instrumental` while the
+  chord symbols live in `Vocal` — hearing both at once is the useful default.
+- **Each chord rings until the next one**, filling the bar (or several bars, if
+  the chord repeats). A chord written mid-bar sounds from its own position.
+
+**The voicing is an interpretation, not data in the file.** A chord symbol is
+just a name — `C#m7` says nothing about which octave or how many notes. To make
+it audible the editor expands the symbol into a sensible voicing:
+
+```
+C#m   -> C#2 G#2 C#3 E3        root in the bass, chord tones stacked above
+B7    -> B1 F#2 A2 B2 D#3      the seventh included
+F#m/C#-> C#2 F#2 A2 C#3        slash chords put the written bass note on the bottom
+```
+
+They are voiced **low** (roughly C2–A3) while melodies sit around B4–A5, so the
+harmony supports the melody instead of masking it, and they play more quietly
+and with a different tone. Slash chords are respected: `C#m/G#` really does put
+G# underneath.
+
+This preview is a sketching aid. It is a plain synthesizer, not a rendering of
+YuE2's arrangement — YuE2 will choose its own voicings, instruments and register
+when you run the workflow. Use it to check that the *progression* is right, not
+how it will finally sound.
+
+### Things to know about the chord modal
+
+- **It follows the selected section.** Open it on `intro` and you see that
+  section's bars; switch `Section` and reopen for another part. The modal header
+  names the section, meter and bar range it is showing.
+- **Beats per bar come from the meter**, not a fixed four: `4/4` → 4 cells,
+  `3/4` → 3, `5/4` → 5, `6/8` → 3, `12/8` → 6.
+- **Add, move and remove chords freely.** Click a dashed `+` to place one on a
+  free beat, use `→ n` to move it to another beat of the same bar, and `−` to
+  clear a single beat.
+- **The footer button clears only what you are looking at.** Its label names the
+  scope, so there is no guessing:
+
+  | Modal is showing | Button reads | It removes |
+  | --- | --- | --- |
+  | One bar | `Clear bar 7` | Every chord in bar 7 |
+  | Whole section | `Clear section "intro"` | Every chord in the intro section |
+
+  It is disabled when there is nothing to clear, and it **never wipes the whole
+  score** — to empty the song, clear each section in turn.
+- **Edits apply as you make them**, so there is nothing to save or confirm.
+- **Playback follows beats, not bar lines** — what you hear matches what the
+  cells say.
+- **You can keep editing notes with the modal open**, though closing it first
+  gives the roll more room.
 
 ### A worked example
 
@@ -565,9 +655,9 @@ Remember the `Melody` switch on the top bar when a part looks empty.
 
 ### 4. Add harmony
 
-Once the melody holds up on its own, open **Harmony (optional)** and set chords
-per bar, or add slash chords for bass movement. A progression that follows the
-form:
+Once the melody holds up on its own, open **`Chords…`** and set the progression
+beat by beat, or use slash chords for bass movement. A progression that follows
+the form:
 
 ```
 intro        C#m                        (pedal)

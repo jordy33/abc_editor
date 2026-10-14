@@ -30,6 +30,74 @@ function shape(tag, attributes, parent) {
 }
 
 const pitchClass = name => ({C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11}[name[0]] + [...name.slice(1)].reduce((sum, accidental) => sum + (accidental === "#" ? 1 : accidental === "b" ? -1 : 0), 0) + 12) % 12;
+
+/**
+ * How many beats a bar contains, from the score's meter.
+ *
+ * The beat is the quarter note, so a bar holds `numerator * 4 / denominator`
+ * of them: 4/4 -> 4, 3/4 -> 3, 5/4 -> 5, 6/8 -> 3, 12/8 -> 6. This replaces a
+ * hard-coded `/4`, which silently mislabelled every compound meter.
+ */
+export function beatsPerBar(meter) {
+    const match = /^(\d+)\s*\/\s*(\d+)$/.exec(meter ?? "");
+    if (!match) return 4;
+    const [, n, d] = match.map(Number);
+    if (!n || !d) return 4;
+    return (n * 4) / d;
+}
+
+/* Chord voicing ------------------------------------------------------------
+ * The score stores only a chord *symbol* ("C#m7"), not notes. To hear it we
+ * expand that symbol into a sensible voicing, the same way a keyboard player
+ * would: root in the bass, chord tones stacked above it, kept in a register
+ * below the melody so the two do not fight.
+ *
+ * Intervals are semitones above the root, matching app/abc_score.py QUALITIES.
+ */
+const CHORD_INTERVALS = {
+    "": [0, 4, 7], "m": [0, 3, 7], "dim": [0, 3, 6], "aug": [0, 4, 8],
+    "7": [0, 4, 7, 10], "maj7": [0, 4, 7, 11], "m7": [0, 3, 7, 10],
+    "dim7": [0, 3, 6, 9], "m7b5": [0, 3, 6, 10], "sus4": [0, 5, 7],
+    "sus2": [0, 2, 7], "6": [0, 4, 7, 9], "m6": [0, 3, 7, 9],
+    "7sus4": [0, 5, 7, 10], "m(maj7)": [0, 3, 7, 11],
+};
+
+/** Split "C#m7/G#" into its parts. Returns null for an unparseable symbol. */
+function parseChord(symbol) {
+    const match = /^([A-G](?:bb|##|b|#)?)(.*?)(?:\/([A-G](?:bb|##|b|#)?))?$/.exec(symbol ?? "");
+    if (!match) return null;
+    const [, rootText, quality, bassText] = match;
+    const intervals = CHORD_INTERVALS[quality];
+    if (!intervals) return null;
+    // Middle octave: C4..B4 -> MIDI 60..71. pitchClass alone gives 0..11.
+    const root = 60 + pitchClass(rootText);
+    const bass = bassText === undefined ? root : 60 + pitchClass(bassText);
+    return {root, intervals, bass};
+}
+
+/**
+ * Turn a chord symbol into MIDI pitches, voiced in a low register.
+ * `lowest` is the MIDI note the bass should sit on; chord tones stack above.
+ */
+function chordVoicing(symbol, lowest = 40) {
+    const parsed = parseChord(symbol);
+    if (!parsed) return [];
+    const notes = new Set();
+    // Place the bass note at `lowest` (or as near it as its pitch class allows).
+    let bass = parsed.bass;
+    while (bass < lowest - 6) bass += 12;
+    while (bass > lowest + 6) bass -= 12;
+    notes.add(bass);
+    // Stack the chord tones above the bass, within a tenth or so.
+    for (const interval of parsed.intervals) {
+        let pitch = parsed.root + interval;
+        while (pitch < bass) pitch += 12;
+        while (pitch > bass + 16) pitch -= 12;
+        notes.add(pitch);
+    }
+    return [...notes].filter(pitch => pitch >= 0 && pitch <= 127).sort((a, b) => a - b);
+}
+
 export function transposeScore(data, key) {
     let delta = (pitchClass(key.replace(/m$/, "")) - pitchClass(data.key.replace(/m$/, "")) + 12) % 12;
     if (delta > 6) delta -= 12;
@@ -42,7 +110,7 @@ export function transposeScore(data, key) {
 }
 
 export class PianoRoll {
-    constructor(editor) { this.editor = editor; this.section = 0; this.track = "Ins"; this.snap = 64; this.low = 48; this.selected = new Set(); this.position = 0; this.playing = false; this.metronome = false; }
+    constructor(editor) { this.editor = editor; this.section = 0; this.track = "Ins"; this.snap = 64; this.low = 48; this.selected = new Set(); this.position = 0; this.playing = false; this.metronome = false; this.harmony = true; }
     get data() { return this.editor.data; }
     row(parent) { const item = el("div", null, parent); item.className = "row"; return item; }
     bounds() {
@@ -77,16 +145,76 @@ export class PianoRoll {
         this.playButton = button(tools, this.playing ? "Pause" : "Play", () => this.togglePlayback()); button(tools, "Stop", () => this.stop(), true);
         const metronome = el("input", null, el("label", "Metronome", tools)); metronome.type = "checkbox"; metronome.checked = this.metronome;
         metronome.onchange = () => { const playing = this.playing; this.pause(); this.metronome = metronome.checked; if (playing) this.play(); this.editor.root.focus(); };
+        const harmony = el("input", null, el("label", "Harmony", tools)); harmony.type = "checkbox"; harmony.checked = this.harmony;
+        harmony.title = "Hear the chord symbols during playback. They sound in the Sung melody voice, where YuE2 keeps them.";
+        harmony.onchange = () => { const playing = this.playing; this.pause(); this.harmony = harmony.checked; if (playing) this.play(); this.editor.root.focus(); };
         button(tools, "Delete selected", () => this.deleteNote(), true);
         button(tools, "Clear melody", () => this.editor.commit(data => { data.roll.tracks[this.track] = []; }), true);
         button(tools, "+ Bar", () => this.addBar(), true);
         button(tools, "Octave ↓", () => { this.low = Math.max(0, this.low - 12); this.draw(); }, true);
         button(tools, "Octave ↑", () => { this.low = Math.min(92, this.low + 12); this.draw(); }, true);
         button(tools, "Instrumental only", () => this.editor.commit(data => { data.roll.tracks.Vocal = []; this.track = "Ins"; }), true);
+        // Harmony opens in a modal rather than inline: editing a chord re-renders
+        // the whole roll, which would scroll the page away from an inline panel
+        // on every change. A modal keeps its own position.
+        this.harmonyButton = button(tools, "Chords…", () => this.openHarmony());
+        this.harmonyButton.title = "Edit the chord progression beat by beat";
         el("p", "Shift-drag to box-select notes; Shift-click toggles a note. Drag selected notes to move them together. Draw on empty space; drag a single note’s right edge to resize. Drag the timeline to scrub. Space plays/pauses; arrows move the selection; Shift + up/down shifts an octave. Delete removes; Ctrl/Cmd + Z undoes.", root).className = "help";
         this.noteStatus = el("div", "Select a note to see pitch, position and length.", root); this.noteStatus.className = "help";
+        // A strip of per-bar chord buttons sits directly above the timeline, so
+        // the progression reads at a glance and any bar opens its own editor.
+        this.chordStrip = el("div", null, root);
+        this.chordStrip.className = "chord-strip";
+        const stripLabel = el("div", "♫", this.chordStrip);
+        stripLabel.className = "chord-strip-label";
+        stripLabel.title = "Chords by bar — click a bar to edit its harmony";
+        this.chordStripViewport = el("div", null, this.chordStrip);
+        this.chordStripViewport.className = "chord-strip-viewport";
+        this.chordStripRow = el("div", null, this.chordStripViewport);
+        this.chordStripRow.className = "chord-strip-row";
         this.scroll = el("div", null, root); this.scroll.className = "roll";
-        this.draw(); this.scroll.scrollLeft = scroll.left; this.scroll.scrollTop = scroll.top; this.renderChords();
+        this.draw(); this.scroll.scrollLeft = scroll.left; this.scroll.scrollTop = scroll.top;
+    }
+
+    /**
+     * Rebuild the per-bar chord strip.
+     *
+     * Widths mirror `draw()` exactly so each button lines up with its bar in the
+     * grid below; called from draw() so the two never drift apart.
+     */
+    drawChordStrip(width) {
+        if (!this.chordStripRow) return;
+        const {start, section} = this.bounds();
+        const barTicks = this.data.roll.bar_ticks;
+        const px = width ?? this.zoom ?? 1;
+        this.chordStripRow.replaceChildren();
+        const barWidth = barTicks / PPQ * px;
+        for (let bar = 0; bar < section.bars; bar++) {
+            const barStart = start + bar * barTicks, barEnd = barStart + barTicks;
+            const inBar = this.data.roll.chords
+                .filter(chord => chord.start >= barStart && chord.start < barEnd)
+                .sort((a, b) => a.start - b.start);
+            const item = el("button", null, this.chordStripRow);
+            item.type = "button";
+            item.className = "chord-strip-button" + (inBar.length ? "" : " empty");
+            item.style.width = `${Math.max(30, barWidth)}px`;
+            const number = el("span", String(section.start + bar + 1), item);
+            number.className = "chord-strip-number";
+            // Summarise the bar: one symbol, or several if it changes mid-bar.
+            const symbol = el("span", inBar.length ? [...new Set(inBar.map(c => c.symbol))].join(" ") : "—", item);
+            symbol.className = "chord-strip-symbol";
+            item.title = inBar.length
+                ? `Bar ${section.start + bar + 1}: ${inBar.map(c => c.symbol).join(" → ")} — click to edit`
+                : `Bar ${section.start + bar + 1}: no chord — click to add one`;
+            item.onclick = () => this.openHarmony(bar);
+        }
+        this.syncChordStrip();
+    }
+
+    /** Keep the strip horizontally aligned with the roll's scroll position. */
+    syncChordStrip() {
+        if (!this.chordStripRow) return;
+        this.chordStripRow.style.transform = `translateX(${-(this.scroll?.scrollLeft || 0)}px)`;
     }
     draw() {
         this.scroll.replaceChildren(); const {start, end, section} = this.bounds();
@@ -124,8 +252,11 @@ export class PianoRoll {
             shape("rect", {x: 0, y: TOP + row * ROW, width: KEYS, height: ROW, fill: black ? "#392342" : "#e6dfea", stroke: "#765287", cursor: "pointer"}, keyboard);
             shape("text", {x: 4, y: TOP + row * ROW + 12, fill: black ? "#ddd" : "#211029", "font-size": 10, "pointer-events": "none"}, keyboard).textContent = pitchName(pitch);
         }
-        this.scroll.onscroll = () => keyboard.setAttribute("transform", `translate(${this.scroll.scrollLeft || 0},0)`);
+        this.scroll.onscroll = () => { keyboard.setAttribute("transform", `translate(${this.scroll.scrollLeft || 0},0)`); this.syncChordStrip(); };
         this.scroll.onscroll();
+        // The strip is built from the same zoom the grid just used, so the two
+        // stay aligned; rebuilt on every draw because section/width can change.
+        this.drawChordStrip(PX);
         this.cursor = shape("line", {y1: 0, y2: height, stroke: "#fff", "stroke-width": 2, cursor: "ew-resize", "data-playhead": "true"}, this.svg);
         this.cursorHandle = shape("rect", {y: 1, width: 10, height: TOP - 2, rx: 3, fill: "#fff", cursor: "ew-resize", "data-playhead": "true"}, this.svg);
         this.updateCursor();
@@ -264,28 +395,265 @@ export class PianoRoll {
         svg.onpointerup = e => { update(e); finish(); if (JSON.stringify(before) !== JSON.stringify(next)) this.commitSelection(next); };
         svg.onpointercancel = () => { finish(); this.draw(); };
     }
-    renderChords() {
-        const {start, section} = this.bounds(), root = el("details", null, this.editor.piano);
-        el("summary", "Harmony (optional)", root);
-        root.open = this.harmonyOpen || false; root.ontoggle = () => { this.harmonyOpen = root.open; };
-        const row = el("div", null, root); row.className = "chords";
-        const roots = ["C", "C#", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
-        for (let bar = 0; bar < section.bars; bar++) {
-            const tick = start + bar * this.data.roll.bar_ticks, at = this.data.roll.chords.find(chord => chord.start === tick);
-            const card = el("div", null, row);
-            el("strong", `Bar ${section.start + bar + 1}`, card);
-            el("div", at?.symbol || "No chord", card);
-            const match = at?.symbol.match(/^([A-G][#b]?)(.*)$/);
-            const set = symbol => this.editor.commit(data => {
-                data.roll.chords = data.roll.chords.filter(c => c.start !== tick);
-                if (symbol !== "—") data.roll.chords.push({start: tick, symbol});
-            });
-            const rootSelect = combo(card, "Root", [...new Set(["—", ...roots, ...(match ? [match[1]] : [])])], match?.[1] || "—", root => set(root === "—" ? root : root + quality.value));
-            const qualities = [...new Set([...this.data.qualities, ...(match ? [match[2]] : [])])];
-            const quality = combo(card, "Type", qualities.map(q => [q, q || "Major"]), match?.[2] || "", q => { if (rootSelect.value !== "—") set(rootSelect.value + q); });
+    /* ------------------------------------------------------------------ chords
+     * Harmony is edited in a modal, not inline.
+     *
+     * Every chord edit goes through editor.commit(), which re-validates the
+     * score server-side and calls render() — rebuilding the whole piano roll.
+     * An inline panel inside that tree was therefore destroyed and rebuilt on
+     * each change, throwing away the page scroll position, so editing a chord
+     * halfway down a long score scrolled you back to the top.
+     *
+     * The modal lives outside the roll's DOM. It survives a render() untouched,
+     * keeps its own scroll, and only refreshes the numbers it needs.
+     */
+
+    /**
+     * Open the chord editor.
+     *
+     * `focusBar` (a 0-based bar index within the section) limits the modal to a
+     * single bar, which is how the strip above the timeline opens it: a whole
+     * section at once was a wall of controls and hard to navigate. Passing
+     * nothing shows the whole section. Either way the bar can be changed from
+     * inside the modal with ◀ / ▶.
+     */
+    openHarmony(focusBar = null) {
+        if (this.harmonyModal) { this.harmonyFocusBar = focusBar; this.renderHarmonyBody(); this.harmonyModal.focus(); return; }
+        this.harmonyFocusBar = focusBar;
+        this.harmonyScope = focusBar === null ? "section" : "bar";
+        const overlay = el("div");
+        overlay.className = "fl-yue2-modal-overlay";
+        const modal = el("div", null, overlay);
+        modal.className = "fl-yue2-modal";
+        modal.tabIndex = -1;
+        this.harmonyModal = modal;
+
+        const header = el("div", null, modal);
+        header.className = "modal-header";
+        this.harmonyTitle = el("strong", "Chords", header);
+        this.harmonySummary = el("span", null, header);
+        this.harmonySummary.className = "modal-summary";
+
+        // Bar navigation: step through bars without leaving the modal.
+        const nav = el("div", null, header);
+        nav.className = "modal-nav";
+        this.harmonyPrev = button(nav, "◀", () => this.stepHarmonyBar(-1), true);
+        this.harmonyBarLabel = el("span", "", nav);
+        this.harmonyBarLabel.className = "modal-bar-label";
+        this.harmonyNext = button(nav, "▶", () => this.stepHarmonyBar(1), true);
+        this.harmonyScopeButton = button(nav, "Whole section", () => this.toggleHarmonyScope(), true);
+
+        const close = button(header, "Close", () => this.closeHarmony(), true);
+        close.className = "modal-close";
+
+        this.harmonyBody = el("div", null, modal);
+        this.harmonyBody.className = "modal-body";
+
+        const footer = el("div", null, modal);
+        footer.className = "modal-footer";
+        el("span", "Click a chord name to hear it. Edits save as you make them.", footer).className = "modal-hint";
+        // Contextual clear: it removes what you are actually looking at — the
+        // focused bar, or the section in whole-section view. Naming the scope
+        // on the button avoids the surprise of wiping the whole score.
+        this.harmonyClearButton = button(footer, "Clear bar", () => this.clearHarmonyScope(), true);
+
+        // Click the backdrop or press Escape to dismiss.
+        overlay.onpointerdown = event => { if (event.target === overlay) this.closeHarmony(); };
+        modal.onkeydown = event => {
+            if (event.key === "Escape") { event.stopPropagation(); this.closeHarmony(); }
+            if (event.key === "ArrowLeft") { event.stopPropagation(); this.stepHarmonyBar(-1); }
+            if (event.key === "ArrowRight") { event.stopPropagation(); this.stepHarmonyBar(1); }
+            // Keep typing inside the modal from triggering roll shortcuts.
+            event.stopPropagation();
+        };
+
+        this.editor.root.append(overlay);
+        this.renderHarmonyBody();
+        modal.focus();
+    }
+
+    /** Move the modal one bar left or right within the current section. */
+    stepHarmonyBar(delta) {
+        const {section} = this.bounds();
+        const current = this.harmonyFocusBar ?? 0;
+        this.harmonyFocusBar = Math.max(0, Math.min(section.bars - 1, current + delta));
+        if (this.harmonyScope === "section") this.harmonyScope = "bar";
+        this.renderHarmonyBody();
+    }
+
+    /** Switch between editing one bar and the whole section. */
+    toggleHarmonyScope() {
+        this.harmonyScope = this.harmonyScope === "bar" ? "section" : "bar";
+        if (this.harmonyScope === "bar" && this.harmonyFocusBar === null) this.harmonyFocusBar = 0;
+        this.renderHarmonyBody();
+    }
+
+    /**
+     * Clear the chords of whatever the modal is currently showing.
+     *
+     * In bar view that is the focused bar only; in section view it is every bar
+     * of the current section. The whole score is never cleared from here — for
+     * that, each section can be cleared in turn.
+     */
+    clearHarmonyScope() {
+        const {start, section} = this.bounds();
+        const barTicks = this.data.roll.bar_ticks;
+        if (this.harmonyScope === "bar") {
+            const bar = Math.max(0, Math.min(section.bars - 1, this.harmonyFocusBar ?? 0));
+            const barStart = start + bar * barTicks, barEnd = barStart + barTicks;
+            return this.editor.commit(data => {
+                data.roll.chords = data.roll.chords.filter(c => c.start < barStart || c.start >= barEnd);
+            }).then(() => { this.renderHarmonyBody(); return true; });
         }
-        if (this.data.roll.chords.some(c => c.start % this.data.roll.bar_ticks !== 0)) el("p", "Chord changes within a bar are preserved; edit their timing in Advanced ABC.", root).className = "help";
-        button(root, "Remove chords (free harmony)", () => this.editor.commit(data => { data.roll.chords = []; }), true);
+        const sectionStart = start, sectionEnd = start + section.bars * barTicks;
+        return this.editor.commit(data => {
+            data.roll.chords = data.roll.chords.filter(c => c.start < sectionStart || c.start >= sectionEnd);
+        }).then(() => { this.renderHarmonyBody(); return true; });
+    }
+
+    closeHarmony() {
+        // Restore the roll's own scroll after any re-render the edits caused.
+        const keep = {left: this.scroll?.scrollLeft || 0, top: this.scroll?.scrollTop || 0};
+        this.harmonyModal?.parentElement?.remove();
+        this.harmonyModal = null;
+        this.harmonyBody = null;
+        this.harmonySummary = null;
+        this.harmonyFocusBar = null;
+        if (this.scroll) { this.scroll.scrollLeft = keep.left; this.scroll.scrollTop = keep.top; }
+        this.editor.root.focus();
+    }
+
+    /** Rebuild the modal's list from current data, preserving its scroll. */
+    renderHarmonyBody() {
+        const body = this.harmonyBody;
+        if (!body) return;
+        const keep = body.scrollTop;
+        body.replaceChildren();
+
+        const {start, section} = this.bounds();
+        const barTicks = this.data.roll.bar_ticks;
+        const beats = beatsPerBar(this.data.meter);
+        const slotsPerBar = Math.max(1, Math.ceil(beats - 1e-9));
+        const beatTicks = barTicks / beats;
+        const roots = ["C", "C#", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+
+        // Which bars to show: just the focused one, or the whole section.
+        const single = this.harmonyScope === "bar";
+        const first = single ? Math.max(0, Math.min(section.bars - 1, this.harmonyFocusBar ?? 0)) : 0;
+        const last = single ? first : section.bars - 1;
+        if (single) this.harmonyFocusBar = first;
+
+        this.harmonyTitle.textContent = single ? `Bar ${section.start + first + 1}` : "Chord progression";
+        this.harmonySummary.textContent = `Section ${section.name} · ${this.data.meter} · ${slotsPerBar} beat${slotsPerBar === 1 ? "" : "s"}`;
+        if (this.harmonyBarLabel) {
+            this.harmonyBarLabel.textContent = `${section.start + first + 1} / ${section.start + section.bars}`;
+            this.harmonyPrev.disabled = first === 0;
+            this.harmonyNext.disabled = first === section.bars - 1;
+            this.harmonyScopeButton.textContent = single ? "Whole section" : "One bar";
+            this.harmonyBarLabel.hidden = !single;
+            this.harmonyPrev.hidden = !single;
+            this.harmonyNext.hidden = !single;
+            // Say exactly what will be cleared, and disable when there is
+            // nothing to clear so the button never looks destructive for nothing.
+            const hasChords = single
+                ? this.data.roll.chords.some(c => c.start >= start + first * barTicks && c.start < start + (first + 1) * barTicks)
+                : this.data.roll.chords.some(c => c.start >= start && c.start < start + section.bars * barTicks);
+            if (this.harmonyClearButton) {
+                this.harmonyClearButton.textContent = single
+                    ? `Clear bar ${section.start + first + 1}`
+                    : `Clear section “${section.name}”`;
+                this.harmonyClearButton.disabled = !hasChords;
+                this.harmonyClearButton.title = single
+                    ? `Remove every chord in bar ${section.start + first + 1}`
+                    : `Remove every chord in the ${section.name} section`;
+            }
+        }
+
+        // One commit per edit, and only the modal is rebuilt afterwards.
+        const setAt = (tick, symbol) => this.editor.commit(data => {
+            data.roll.chords = data.roll.chords.filter(c => c.start !== tick);
+            if (symbol && symbol !== "—") data.roll.chords.push({start: tick, symbol});
+        }).then(() => { this.renderHarmonyBody(); return true; });
+
+        const moveFrom = (from, target, symbol) => this.editor.commit(data => {
+            data.roll.chords = data.roll.chords.filter(c => c.start !== from && c.start !== target);
+            data.roll.chords.push({start: target, symbol});
+        }).then(() => { this.renderHarmonyBody(); return true; });
+
+        const table = el("div", null, body);
+        table.className = "chord-table";
+
+        for (let bar = first; bar <= last; bar++) {
+            const barStart = start + bar * barTicks, barEnd = barStart + barTicks;
+            const inBar = this.data.roll.chords
+                .filter(chord => chord.start >= barStart && chord.start < barEnd)
+                .sort((a, b) => a.start - b.start);
+
+            const barRow = el("div", null, table);
+            barRow.className = "chord-bar" + (single ? " single" : "");
+            const label = el("div", `Bar ${section.start + bar + 1}`, barRow);
+            label.className = "chord-bar-label";
+
+            const beatsRow = el("div", null, barRow);
+            beatsRow.className = "chord-beats";
+
+            for (let beat = 1; beat <= slotsPerBar; beat++) {
+                const at = inBar.find(c => Math.round((c.start - barStart) / beatTicks + 1) === beat);
+                beatsRow.append(this.chordBeatCell(barStart, beat, beatTicks, at, setAt, moveFrom, roots, slotsPerBar));
+            }
+        }
+        body.scrollTop = single ? 0 : keep;
+    }
+
+    /** One beat cell: beat number, chord name, root/type pickers, clear. */
+    chordBeatCell(barStart, beat, beatTicks, at, setAt, moveFrom, roots, slotsPerBar) {
+        const tick = barStart + Math.round((beat - 1) * beatTicks);
+        const cell = el("div", null, null);
+        cell.className = "chord-cell" + (at ? " filled" : "");
+
+        const top = el("div", null, cell);
+        top.className = "chord-cell-top";
+        const beatTag = el("span", `beat ${beat}`, top);
+        beatTag.className = "chord-beat";
+
+        const name = el("button", at?.symbol || "+", top);
+        name.type = "button";
+        name.className = "chord-name" + (at ? "" : " empty");
+        name.title = at ? "Click to hear this chord" : "No chord on this beat — pick a root below";
+        // When empty, clicking picks a sensible default so a chord can be added
+        // without touching two dropdowns.
+        name.onclick = () => at ? this.auditionChord(at.symbol) : setAt(tick, "C");
+
+        const match = at?.symbol.match(/^([A-G][#b]?)(.*)$/);
+        const picks = el("div", null, cell);
+        picks.className = "chord-cell-picks";
+
+        const rootSelect = combo(picks, "", [...new Set(["—", ...roots, ...(match ? [match[1]] : [])])], match?.[1] || "—",
+            value => setAt(tick, value === "—" ? null : value + quality.value));
+        rootSelect.title = "Chord root";
+        const qualities = [...new Set([...this.data.qualities, ...(match ? [match[2]] : [])])];
+        const quality = combo(picks, "", qualities.map(q => [q, q || "Major"]), match?.[2] || "",
+            value => { if (rootSelect.value !== "—") setAt(tick, rootSelect.value + value); });
+        quality.title = "Chord quality";
+
+        // Moving this chord to another beat of the same bar, in one commit.
+        const beatSelect = combo(picks, "", Array.from({length: slotsPerBar}, (_, i) => [i + 1, `→ ${i + 1}`]), beat,
+            value => {
+                const target = barStart + Math.round((Number(value) - 1) * beatTicks);
+                if (!at) { setAt(target, "C"); return; }
+                if (target === tick) return;
+                moveFrom(tick, target, at.symbol);
+            });
+        beatSelect.title = "Move this chord to another beat";
+
+        const remove = el("button", "−", picks);
+        remove.type = "button";
+        remove.className = "chord-remove";
+        remove.title = at ? "Remove this chord" : "Nothing to remove";
+        remove.disabled = !at;
+        remove.onclick = () => setAt(tick, null);
+
+        return cell;
     }
     deleteNote() { if (this.selected.size) this.editor.commit(data => { data.roll.tracks[this.track] = data.roll.tracks[this.track].filter((_, i) => !this.selected.has(i)); }); }
     async nudge(key, octave) {
@@ -315,7 +683,22 @@ export class PianoRoll {
         this.auditionTimer = setTimeout(() => this.stopAudition(), 450);
     }
     stopAudition() {
-        clearTimeout(this.auditionTimer); this.auditionAudio?.close(); this.auditionAudio = null; this.auditionVoice = null;
+        clearTimeout(this.auditionTimer); this.auditionAudio?.close(); this.auditionAudio = null; this.auditionVoice = null; this.auditionVoices = null;
+    }
+    /** Play a chord's voicing on its own, for checking a symbol by ear. */
+    async auditionChord(symbol) {
+        const pitches = chordVoicing(symbol, 40);
+        if (!pitches.length) return;
+        clearTimeout(this.auditionTimer);
+        const audio = this.auditionAudio ||= new AudioContext(), version = this.auditionVersion = (this.auditionVersion || 0) + 1;
+        await audio.resume(); if (this.auditionAudio !== audio || version !== this.auditionVersion) return;
+        this.auditionVoice?.stop();
+        for (const voice of this.auditionVoices || []) voice.stop();
+        const at = audio.currentTime;
+        // A little longer than a single note, so the chord is recognisable.
+        this.auditionVoices = pitches.map(pitch => this.tone(audio, pitch, at, at + 0.85, 0.09, "sawtooth"));
+        this.auditionVoice = this.auditionVoices[0];
+        this.auditionTimer = setTimeout(() => this.stopAudition(), 1100);
     }
     tone(audio, pitch, on, off, volume = 0.12, type = "triangle") {
         const oscillator = audio.createOscillator(), gain = audio.createGain();
@@ -403,6 +786,30 @@ export class PianoRoll {
             const a = Math.max(from, note.start), b = Math.min(end, note.start + note.duration); if (b <= a) continue;
             const on = now + (a - from) * seconds, off = now + (b - from) * seconds;
             this.tone(audio, note.pitch, on, off);
+        }
+        // Harmony: each chord sounds from its start until the next chord (or the
+        // end of the section). Voiced low and played softer than the melody so it
+        // supports rather than masks it.
+        //
+        // The chords play regardless of which voice is displayed. They live in
+        // the Vocal voice in native YuE2 ABC, but tying playback to `this.track`
+        // meant the intro — which has almost no vocal notes, so you are looking
+        // at Instrumental — appeared to have no harmony at all. The accompaniment
+        // belongs to the song, not to whichever lane happens to be on screen.
+        if (this.harmony && this.data.roll.chords.length) {
+            const sectionChords = this.data.roll.chords
+                .filter(chord => chord.start >= start && chord.start < end)
+                .sort((a, b) => a.start - b.start);
+            sectionChords.forEach((chord, index) => {
+                const a = Math.max(from, chord.start);
+                const next = sectionChords[index + 1];
+                const b = Math.min(end, next ? next.start : end);
+                if (b <= a) return;
+                const on = now + (a - from) * seconds, off = now + (b - from) * seconds;
+                for (const pitch of chordVoicing(chord.symbol, 40)) {
+                    this.tone(audio, pitch, on, off, 0.075, "sawtooth");
+                }
+            });
         }
         if (this.metronome) {
             const beat = PPQ * 4 / Number(this.data.meter.split("/")[1]);

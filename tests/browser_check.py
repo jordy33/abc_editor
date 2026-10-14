@@ -77,15 +77,155 @@ def main():
     check("status shows bars/bpm", "bars" in (s.eval("document.querySelector('.fl-yue2-editor .status').textContent") or ""))
     check("no error status", "error" not in (s.eval("document.querySelector('.fl-yue2-editor .status').className") or ""))
 
-    print("\n== chord lane ==")
-    chords = s.eval("""(()=>{
-        const root=[...document.querySelectorAll('.fl-yue2-editor details')].find(d=>d.querySelector('summary').textContent.includes('Harmony'));
-        if(!root) return null; root.open=true;
-        return {summary:root.querySelector('summary').textContent, cards:root.querySelectorAll('.chords > div').length, selects:root.querySelectorAll('.chords select').length};
+    print("\n== chord strip above the timeline ==")
+    strip = s.eval("""(()=>{
+        const strip=document.querySelector('.fl-yue2-editor .chord-strip');
+        const roll=document.querySelector('.fl-yue2-editor .roll');
+        if(!strip||!roll) return null;
+        const sr=strip.getBoundingClientRect(), rr=roll.getBoundingClientRect();
+        const buttons=[...strip.querySelectorAll('.chord-strip-button')];
+        return {
+            buttons: buttons.length,
+            above: sr.bottom <= rr.top + 2,
+            labels: buttons.map(b=>b.querySelector('.chord-strip-number').textContent),
+            widths: [...new Set(buttons.map(b=>Math.round(b.getBoundingClientRect().width)))].length,
+            hasIcon: !!strip.querySelector('.chord-strip-label'),
+        };
     })()""")
-    check("harmony section present", chords is not None, str(chords))
+    check("chord strip rendered", strip is not None, str(strip))
+    if strip:
+        # The default score's first section is 4 bars, so the strip shows 4.
+        check("one button per bar in the section", strip["buttons"] >= 4, str(strip))
+        check("strip sits above the roll", strip["above"] is True, str(strip))
+        check("buttons share one width (aligned to bars)", strip["widths"] == 1, str(strip))
+        check("strip carries a chord icon", strip["hasIcon"] is True, str(strip))
+        check("bars numbered 1..n", strip["labels"][:3] == ["1", "2", "3"], str(strip["labels"][:5]))
+
+    print("\n== clicking a bar opens that bar only ==")
+    perbar = s.eval("""(async()=>{
+        const buttons=[...document.querySelectorAll('.chord-strip-button')];
+        // Pick a bar that exists in this section (the default has 4).
+        const btn=buttons[Math.min(2, buttons.length-1)];
+        if(!btn) return null;
+        const wanted=btn.querySelector('.chord-strip-number').textContent;
+        btn.click();
+        await new Promise(r=>setTimeout(r,1100));
+        const m=document.querySelector('.fl-yue2-modal');
+        if(!m) return null;
+        const title=m.querySelector('.modal-header strong').textContent;
+        const out={
+            wanted: 'Bar '+wanted,
+            title,
+            bars: m.querySelectorAll('.chord-bar').length,
+            cells: m.querySelectorAll('.chord-cell').length,
+        };
+        // Step to the next bar with the nav control.
+        const next=[...m.querySelectorAll('.modal-nav button')].find(b=>b.textContent==='▶');
+        next.click();
+        await new Promise(r=>setTimeout(r,900));
+        const m2=document.querySelector('.fl-yue2-modal');
+        out.titleAfterStep = m2.querySelector('.modal-header strong').textContent;
+        out.barsAfterStep = m2.querySelectorAll('.chord-bar').length;
+        return out;
+    })()""", await_promise=True)
+    check("bar button opens a single-bar modal", bool(perbar and perbar["bars"] == 1), str(perbar))
+    check("modal is titled with the clicked bar", bool(perbar and perbar["title"] == perbar["wanted"]), str(perbar))
+    check("all beats of that bar shown", bool(perbar and perbar["cells"] >= 3), str(perbar))
+    check("nav steps to the next bar", bool(perbar and perbar["titleAfterStep"].startswith("Bar ")
+          and perbar["titleAfterStep"] != perbar["title"]), str(perbar))
+
+    print("\n== the clear button is scoped to what you are editing ==")
+    scoped = s.eval("""(async()=>{
+        // Still open on a single bar from the previous step.
+        const m0=document.querySelector('.fl-yue2-modal');
+        if(m0) m0.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+        await new Promise(r=>setTimeout(r,400));
+
+        // Toolbar entry point opens whole-section scope.
+        [...document.querySelectorAll('.fl-yue2-editor .row button')].find(b=>b.textContent.includes('Chords')).click();
+        await new Promise(r=>setTimeout(r,1100));
+        const sectionBtn=[...document.querySelector('.fl-yue2-modal').querySelectorAll('.modal-footer button')][0];
+        const sectionLabel=sectionBtn.textContent;
+
+        // Switching to One bar rescopes it to a single bar.
+        const oneBar=[...document.querySelectorAll('.fl-yue2-modal .modal-nav button')]
+            .find(b=>b.textContent==='One bar');
+        oneBar.click();
+        await new Promise(r=>setTimeout(r,900));
+        const barBtn=[...document.querySelector('.fl-yue2-modal').querySelectorAll('.modal-footer button')][0];
+        return {sectionLabel, barLabel: barBtn.textContent, sectionTitle: sectionLabel.startsWith('Clear section'),
+                barTitle: /^Clear bar \\d+$/.test(barBtn.textContent)};
+    })()""", await_promise=True)
+    check("section scope names the section", bool(scoped and scoped["sectionTitle"]), str(scoped))
+    check("bar scope names the bar", bool(scoped and scoped["barTitle"]), str(scoped))
+
+    print("\n== clearing a bar leaves the rest of the score alone ==")
+    clear = s.eval("""(async()=>{
+        const ed=window.yue2Editor, r=ed.roll;
+        const bar=r.data.roll.bar_ticks, TPB=bar/4;
+        // Put a chord on bar 2 beat 1 so there is something to clear.
+        await ed.commit(d=>{ d.roll.chords.push({start:bar, symbol:'G'}); });
+        await new Promise(x=>setTimeout(x,1500));
+        const before=r.data.roll.chords.length;
+        // Open bar 2 via the strip and clear it.
+        const m0=document.querySelector('.fl-yue2-modal');
+        if(m0) m0.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+        await new Promise(x=>setTimeout(x,400));
+        [...document.querySelectorAll('.chord-strip-button')]
+            .find(b=>b.querySelector('.chord-strip-number').textContent==='2').click();
+        await new Promise(x=>setTimeout(x,1100));
+        const btn=[...document.querySelector('.fl-yue2-modal').querySelectorAll('.modal-footer button')][0];
+        btn.click();
+        await new Promise(x=>setTimeout(x,2000));
+        const after=r.data.roll.chords.length;
+        const inBar2=r.data.roll.chords.filter(c=>c.start>=bar && c.start<2*bar).length;
+        return {before, after, inBar2, elsewhere: r.data.roll.chords.filter(c=>c.start>=2*bar).length};
+    })()""", await_promise=True)
+    check("clearing a bar drops only that bar's chords", bool(clear and clear["inBar2"] == 0 and clear["after"] == clear["before"] - 1), str(clear))
+    check("other bars untouched", bool(clear and clear["elsewhere"] > 0), str(clear))
+
+    s.eval("""(()=>{const m=document.querySelector('.fl-yue2-modal'); if(m) m.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); return 1;})()""")
+
+    print("\n== chord modal ==")
+    chords = s.eval("""(async()=>{
+        const btn=[...document.querySelectorAll('.fl-yue2-editor .row button')].find(b=>b.textContent.includes('Chords'));
+        if(!btn) return null;
+        btn.click();
+        await new Promise(r=>setTimeout(r,900));
+        const modal=document.querySelector('.fl-yue2-modal');
+        if(!modal) return null;
+        return {
+            summary: modal.querySelector('.modal-summary').textContent,
+            bars: modal.querySelectorAll('.chord-bar').length,
+            cells: modal.querySelectorAll('.chord-cell').length,
+            selects: modal.querySelectorAll('.chord-cell select').length,
+        };
+    })()""", await_promise=True)
+    check("chord modal opens from toolbar", chords is not None, str(chords))
     if chords:
-        check("chord controls per bar", chords["cards"] >= 4, str(chords))
+        check("one row per bar", chords["bars"] >= 4, str(chords))
+        check("a cell per beat", chords["cells"] >= chords["bars"] * 3, str(chords))
+        check("root/type/beat pickers per cell", chords["selects"] >= chords["cells"] * 3, str(chords))
+
+    print("\n== modal keeps its place on edit ==")
+    scroll = s.eval("""(async()=>{
+        const body=document.querySelector('.fl-yue2-modal .modal-body');
+        body.scrollTop=300;
+        const before=body.scrollTop;
+        // Edit a chord: set type then root on the first filled cell.
+        const cell=[...document.querySelectorAll('.chord-cell')].find(c=>!c.querySelector('.chord-name').classList.contains('empty'));
+        if(!cell) return {error:'no filled cell'};
+        const sels=cell.querySelectorAll('select');
+        sels[1].value='m'; sels[1].onchange();
+        await new Promise(r=>setTimeout(r,1800));
+        const body2=document.querySelector('.fl-yue2-modal .modal-body');
+        return {before, after: body2 ? body2.scrollTop : -1, stillOpen: !!body2};
+    })()""", await_promise=True)
+    check("modal survives a chord edit", bool(scroll and scroll.get("stillOpen")), str(scroll))
+    check("modal scroll preserved after edit", bool(scroll) and abs(scroll.get("after", -1) - scroll.get("before", 0)) < 5, str(scroll))
+
+    s.eval("""(()=>{const m=document.querySelector('.fl-yue2-modal'); if(m) m.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); return 1;})()""")
+    check("modal closes on Escape", s.eval("!document.querySelector('.fl-yue2-modal')") is True)
 
     print("\n== arrangement controls ==")
     arrange = s.eval("""(()=>{
