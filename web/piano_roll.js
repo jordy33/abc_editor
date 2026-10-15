@@ -535,7 +535,7 @@ export class PianoRoll {
         const beats = beatsPerBar(this.data.meter);
         const slotsPerBar = Math.max(1, Math.ceil(beats - 1e-9));
         const beatTicks = barTicks / beats;
-        const roots = ["C", "C#", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+        const roots = ["C", "C#", "Db", "D", "D#", "Eb", "E", "F", "F#", "Gb", "G", "G#", "Ab", "A", "A#", "Bb", "B"];
 
         // Which bars to show: just the focused one, or the whole section.
         const single = this.harmonyScope === "bar";
@@ -624,17 +624,25 @@ export class PianoRoll {
         // without touching two dropdowns.
         name.onclick = () => at ? this.auditionChord(at.symbol) : setAt(tick, "C");
 
-        const match = at?.symbol.match(/^([A-G][#b]?)(.*)$/);
+        // "G#m7/B" -> root "G#", quality "m7", bass "B". The backend accepts any root
+        // spelling and a slash bass (app/abc_score.py CHORD), so the pickers must too.
+        const match = at?.symbol.match(/^([A-G](?:bb|##|b|#)?)(.*?)(?:\/([A-G](?:bb|##|b|#)?))?$/);
         const picks = el("div", null, cell);
         picks.className = "chord-cell-picks";
 
+        const compose = () => rootSelect.value === "—" ? null
+            : rootSelect.value + quality.value + (bass.value !== "—" ? "/" + bass.value : "");
+
         const rootSelect = combo(picks, "", [...new Set(["—", ...roots, ...(match ? [match[1]] : [])])], match?.[1] || "—",
-            value => setAt(tick, value === "—" ? null : value + quality.value));
+            () => setAt(tick, compose()));
         rootSelect.title = "Chord root";
         const qualities = [...new Set([...this.data.qualities, ...(match ? [match[2]] : [])])];
         const quality = combo(picks, "", qualities.map(q => [q, q || "Major"]), match?.[2] || "",
-            value => { if (rootSelect.value !== "—") setAt(tick, rootSelect.value + value); });
+            () => { if (rootSelect.value !== "—") setAt(tick, compose()); });
         quality.title = "Chord quality";
+        const bass = combo(picks, "", [["—", "/—"], ...[...new Set([...roots, ...(match?.[3] ? [match[3]] : [])])].map(r => [r, "/" + r])], match?.[3] || "—",
+            () => { if (rootSelect.value !== "—") setAt(tick, compose()); });
+        bass.title = "Bass note (slash chord, e.g. C/E). Leave on /— for the root.";
 
         // Moving this chord to another beat of the same bar, in one commit.
         const beatSelect = combo(picks, "", Array.from({length: slotsPerBar}, (_, i) => [i + 1, `→ ${i + 1}`]), beat,
