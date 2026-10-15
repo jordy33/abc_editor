@@ -80,6 +80,30 @@ def test_score_hash_is_stable():
     assert score_hash(DEFAULT_SCORE) != score_hash(DEFAULT_SCORE.replace("=88", "=89"))
 
 
+NATIVE_SAMPLE = """X:1
+T:
+M:4/4
+L:1/16
+Q:1/4=123
+V: Vocal clef=treble name="Vocal Melody" snm="Vocal"
+V: Ins clef=treble name="Ins Melody" snm="Inst."
+K:C#m
+% verse
+V: Vocal
+Z2|"C#m"z16|"F#m"dc2c2c2BB2B2A2G2|
+V: Ins
+Z4|
+"""
+
+
+def test_export_uses_native_spelling():
+    """Key-signature spelling, no redundant '1' or accidentals, Z for empty bars."""
+    out = build_score(inspect_score(NATIVE_SAMPLE))["abc"]
+    assert out == NATIVE_SAMPLE
+    assert "=" not in out.split("K:C#m", 1)[1] and "^" not in out.split("K:C#m", 1)[1]
+    assert "z16|z16" not in out
+
+
 # --- rejection cases -------------------------------------------------------
 
 INVALID_SYNTAX = [

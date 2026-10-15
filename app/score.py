@@ -19,7 +19,7 @@ import hashlib
 import math
 import re
 
-from .abc_score import AbcError, CHORD, DURATIONS, KEYS, QUALITIES, parse, meter_value
+from .abc_score import AbcError, CHORD, DURATIONS, KEYS, NATURAL, QUALITIES, key_accidentals, parse, meter_value
 
 __all__ = ["AbcError", "DEFAULT_SCORE", "inspect_score", "build_score", "score_hash"]
 
@@ -165,11 +165,21 @@ def build_score(data):
     denominator = max(16, 1024 // (grid & -grid))
     unit = 1024 // denominator
 
-    def pitch_text(pitch):
-        names = ["=C", "^C", "=D", "^D", "=E", "=F", "^F", "=G", "^G", "=A", "^A", "=B"]
-        text = names[pitch % 12]
-        octave = pitch // 12 - 1
-        return text.lower() + "'" * (octave - 5) if octave >= 5 else text + "," * (4 - octave)
+    key_alt = key_accidentals(key)
+    sharp_key = KEYS[key] >= 0
+
+    def spell(pitch):
+        """Choose letter and alteration for `pitch` from the key signature alone, so a
+        note and its tied continuation always get the same letter."""
+        candidates = []
+        for letter, base in NATURAL.items():
+            for alt in (0, 1, -1):
+                if (base + alt) % 12 == pitch % 12:
+                    candidates.append((key_alt[letter] != alt, alt != 0, (alt < 0) == sharp_key, letter, alt))
+        _, _, _, letter, alt = min(candidates)
+        octave = (pitch - alt) // 12 - 1
+        text = letter.lower() + "'" * (octave - 5) if octave >= 5 else letter + "," * (4 - octave)
+        return letter, alt, text
 
     def music_bar(name, index):
         start, end = index * bar_ticks, (index + 1) * bar_ticks
@@ -180,17 +190,31 @@ def build_score(data):
         if name == "Vocal":
             boundaries.update(t for t in chords if start <= t < end)
         boundaries = sorted(boundaries)
+        if not notes and not (name == "Vocal" and any(start <= t < end for t in chords)):
+            return "Z"  # native whole-bar rest; runs are merged into Z2..Z4 below
+        local = {}
         parts = []
         for a, b in zip(boundaries, boundaries[1:]):
             if name == "Vocal" and a in chords:
                 parts.append(f'"{chords[a]}"')
             note = next((note for note in notes if note["start"] <= a < note["start"] + note["duration"]), None)
             remaining = (b - a) // unit
+            continuing = note is not None and note["start"] < a
             for length in sorted(DURATIONS, reverse=True):
                 while remaining >= length:
                     remaining -= length
                     tied = note is not None and (remaining > 0 or b < note["start"] + note["duration"])
-                    parts.append((pitch_text(note["pitch"]) if note else "z") + str(length) + ("-" if tied else ""))
+                    if note is None:
+                        token = "z"
+                    else:
+                        letter, alt, text = spell(note["pitch"])
+                        token = text
+                        # A tied continuation is written bare: the parser keeps the pitch.
+                        if not continuing and local.get(letter, key_alt[letter]) != alt:
+                            token = {0: "=", 1: "^", -1: "_"}[alt] + text
+                            local[letter] = alt
+                    continuing = tied
+                    parts.append(token + (str(length) if length != 1 else "") + ("-" if tied else ""))
         return "".join(parts)
 
     lines = ["X:1", "T:", f"M:{meter}", f"L:1/{denominator}", f"Q:1/4={bpm}",
@@ -204,6 +228,16 @@ def build_score(data):
         lines.append("% " + name.replace("\n", " ").replace("\r", " ").strip())
         for start in range(offset, offset + section["bars"], 4):
             for voice in ("Vocal", "Ins"):
-                lines.extend((f"V: {voice}", "|".join(music_bar(voice, i) for i in range(start, min(start + 4, offset + section["bars"]))) + "|"))
+                merged, run = [], 0
+                for text in [music_bar(voice, i) for i in range(start, min(start + 4, offset + section["bars"]))] + [None]:
+                    if text == "Z":
+                        run += 1
+                        continue
+                    if run:
+                        merged.append("Z" if run == 1 else f"Z{run}")
+                        run = 0
+                    if text is not None:
+                        merged.append(text)
+                lines.extend((f"V: {voice}", "|".join(merged) + "|"))
         offset += section["bars"]
     return inspect_score("\n".join(lines))
