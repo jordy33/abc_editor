@@ -116,8 +116,11 @@ python3 -m venv .venv
 **Center notes**, **Instrumental only**, **Clear melody**, **New blank score**,
 and **Advanced ABC** for raw text editing.
 
-**Import / Export** read and write `.abc` files. Scores are also saved to your
-browser automatically, so a refresh does not lose work.
+**Import ABC / Export ABC** read and write `.abc` files. **Export MIDI /
+Import MIDI** move notes to and from a DAW as one file per section — see
+[MIDI round-trip: one file per section](#midi-round-trip-one-file-per-section).
+Scores are also saved to your browser automatically, so a refresh does not lose
+work.
 
 ### First things to know
 
@@ -176,6 +179,10 @@ and note edits all apply to the selected section and voice only.
 4. Edit notes by dragging. Every change is re-validated and written back to the
    ABC text as you go.
 5. **Export ABC** to write the file back out.
+
+To edit in Logic Pro or MuseScore instead, use **Export MIDI**, edit the
+per-section files, and **Import MIDI**; the ABC is updated in place. See
+[MIDI round-trip: one file per section](#midi-round-trip-one-file-per-section).
 
 If the piano roll is disabled and the status line mentions *key or meter
 changes*, see [Scores with meter or key changes](#scores-with-meter-or-key-changes).
@@ -480,6 +487,141 @@ accepted without complaint. That judgement is yours.
 
 ---
 
+## MIDI round-trip: one file per section
+
+**Export MIDI** writes one Standard MIDI File per ABC section — `01_intro.mid`,
+`02_verse.mid`, `03_chorus.mid`, ... — so Logic Pro, MuseScore, or another DAW
+shows each part as its own region or track. Edit the notes there, then **Import
+MIDI** with the edited files. The ABC stays open in the editor and remains the
+source of truth; only the notes of the sections you import are replaced.
+
+This is the intended loop:
+
+```
+YuE2 cover ──▶ .abc ──▶ this editor ──▶ Export MIDI ──▶ edit in Logic/MuseScore
+                ▲                                             │
+                └──────────── Export ABC ◀── Import MIDI ◀────┘
+```
+
+### What is inside each file
+
+Every section file contains three tracks:
+
+| Track | Contents |
+| --- | --- |
+| Conductor | Section marker, tempo, time signature, key signature |
+| `Vocal` | The section's vocal notes (MIDI channel 1) |
+| `Ins` | The section's instrumental notes (MIDI channel 2) |
+
+Both voice tracks are always present, even when a voice is empty in that
+section. Tick 0 is the first bar of the section. Track names and internal
+markers carry the section number:
+
+```
+YUE2-SECTION 02 verse bars=16 voices=Vocal,Ins
+```
+
+The file name is the primary, human-readable key. The embedded marker is the
+safety net: if a DAW renames the file but preserves the marker, the import still
+knows which section it belongs to. A descriptive suffix such as
+`02_chorus copy.mid` is fine when the marker agrees. A disagreement about the
+section **number** is rejected rather than guessed.
+
+Section numbers are **positions**, not permanent IDs. After adding, removing, or
+reordering sections in the ABC, export the MIDI files again before importing any
+older files. The marker's bar count catches many stale arrangements, but not
+all of them.
+
+### Import rules
+
+The loaded ABC defines the song. MIDI files supply notes only:
+
+- **Imported:** note start, duration, and pitch for the matching section.
+- **Not imported:** section order and bar counts, chords, tempo, meter, key,
+  and every other section.
+- **Voices:** files exported here replace both voices in their section. A file
+  with no voice declaration only replaces the voices it actually contains.
+- **Empty tracks:** re-importing an exported file whose voice was emptied in the
+  DAW clears that voice's notes in that section. That is how you delete a part.
+- **Note ownership:** a note belongs to the section where it *starts*. A note
+  that starts in one section and sustains into the next keeps its tail; import
+  the section where it starts to edit it.
+
+### Rejections and warnings
+
+The import is deliberately strict; a failed import leaves the score untouched.
+
+| Situation | Result |
+| --- | --- |
+| File has no section number and cannot be matched | **Rejected** |
+| Two files target the same section | **Rejected** |
+| File name says one section, marker says another | **Rejected** |
+| Markers or track names inside one file disagree | **Rejected** |
+| Drum channel 10, or an unnamed track on channel 3+ | **Rejected** |
+| Two notes overlap in one voice | **Rejected**, with section/bar and pitches |
+| A note starts after the section's last bar | **Rejected** |
+| MIDI time signature differs from the ABC | **Rejected** (bar alignment would break) |
+| Tempo differs | Imported, with a warning; the ABC keeps its BPM |
+| Key signature differs | Imported, with a warning; notes are taken as written |
+| Note is off the 1/32 grid | Imported, quantized, with a warning |
+
+To fix a rejection, keep the exported names, or open the file in the DAW and
+correct the named bar/track. Running **Export MIDI** again is the safest reset.
+
+### What MIDI cannot carry
+
+MIDI is a note transport, not a score document. These stay in the ABC/editor:
+
+- chord symbols (edit them with **`Chords…`**);
+- section names and order;
+- tempo, meter, and key-signature maps (one of each per song).
+
+These are not stored by the editor at all and are dropped on import: velocity,
+articulation, lyrics, and instrument choice. The exported program changes
+(Voice Oohs / piano) are only a DAW preview convention.
+
+Timing is quantized to the editor's grid (1/32 notes, or finer if the score
+already uses a finer `L:`). Triplets and swing are approximated. Both YuE2
+voices are monophonic in each direction, so polyphonic DAW tracks are rejected
+instead of being silently reduced.
+
+### Suggested workflow
+
+1. Open the `.abc` from YuE2 and click **Export MIDI**.
+2. Choose a folder (Chrome/Edge) or allow the individual downloads.
+3. In Logic/MuseScore, keep each file's name and edit its `Vocal`/`Ins` tracks.
+4. Back in the editor, click **Import MIDI** and select the files you changed
+   (one or all of them). Sections you do not select are untouched.
+5. Fix any reported overlap or meter problem, then **Import MIDI** again.
+6. **Export ABC** and feed that file to YuE2.
+
+For `al_otro_lado_del_mar.abc` the export is:
+
+```
+01_intro.mid  02_verse.mid  03_chorus.mid  04_verse.mid
+05_interlude.mid  06_chorus.mid  07_outro.mid
+```
+
+The repeated `verse`/`chorus` names are safe: the number is the section key, and
+the slug is only for human readability.
+
+### DAW notes
+
+- **Logic Pro:** import each file as a separate project, or use *File > Import*
+  and keep the track names. The conductor track carries the section markers.
+  The exported track names end in `- Vocal` and `- Ins`, which survives a rename
+  that keeps those words.
+- **MuseScore:** *File > Import* the MIDI, edit the two staves, then *File >
+  Export > MIDI*. Keep the original file name. MuseScore may rename the tracks
+  to instrument names; before exporting, name them back to **Vocal** and **Ins**
+  (or keep them on MIDI channels 1 and 2). Track names, `YUE2-VOICE` text, and
+  the original channels are the three ways the import recognizes the voices.
+- If a DAW strips the file name, the embedded `YUE2-SECTION` marker still
+  identifies the section. If it strips the marker too, the import cannot
+  identify the section and deliberately refuses to guess.
+
+---
+
 ## Scores with meter or key changes
 
 If you load a score that changes `M:` (meter) or `K:` (key) **after the
@@ -570,7 +712,8 @@ text by hand.
 abc-editor-standalone/
 ├── app/
 │   ├── abc_score.py      copied verbatim from ComfyUI-FL-YuE2/yue2/
-│   └── score.py          inspect_score / build_score (ComfyUI removed)
+│   ├── score.py          inspect_score / build_score (ComfyUI removed)
+│   └── midi.py           per-section Standard MIDI File bridge
 ├── web/
 │   ├── index.html        page shell
 │   ├── style.css         editor styles
@@ -578,6 +721,7 @@ abc-editor-standalone/
 │   └── score_editor.js   standalone shell (node plumbing removed)
 ├── tests/
 │   ├── test_score.py     score logic (no browser needed)
+│   ├── test_midi.py      MIDI round-trip and rejection cases
 │   └── browser_check.py  end-to-end via Chrome DevTools Protocol
 ├── server.py             stdlib HTTP server: static files + score endpoints
 ├── run.sh                create venv, then serve
@@ -604,9 +748,13 @@ Same contract as the ComfyUI node, so the browser code needed only a transport s
 | --- | --- | --- | --- |
 | `POST` | `/fl_yue2/score/validate` | `{"score_abc": "..."}` | parsed score document |
 | `POST` | `/fl_yue2/score/build` | score document | rebuilt ABC + document |
+| `POST` | `/fl_yue2/score/midi/export` | `{"score_abc": "..."}` | `{"files": [...], "summary": ...}` |
+| `POST` | `/fl_yue2/score/midi/import` | `{"score_abc": "...", "files": [...]}` | rebuilt ABC + `import` summary |
 | `GET` | `/fl_yue2/score/default` | – | `{"score_abc": "..."}` |
 
-Errors return HTTP 400 with `{"error": "..."}`, matching the original routes.
+MIDI file `data` is base64-encoded in both directions; each file is one section
+with its own `Vocal` and `Ins` tracks. Errors return HTTP 400 with
+`{"error": "..."}`, matching the original routes.
 
 ---
 
@@ -686,6 +834,14 @@ prompt** there. Style is where instrumentation and production live — the
 editor's chords describe the harmony, and the style prompt describes everything
 else.
 
+### 7. Edit a section in a DAW (optional)
+
+If a section needs a different phrase or voicing, click **Export MIDI**, fix
+that section in Logic Pro or MuseScore, then **Import MIDI** with the edited
+file. Only that section's notes change; chords, form, tempo, meter, and key stay
+as they are. Export the ABC and render again. See
+[MIDI round-trip: one file per section](#midi-round-trip-one-file-per-section).
+
 ### Iterating
 
 Small edits are safe and reversible: the editor re-validates on every change and
@@ -704,8 +860,14 @@ Two habits worth having:
 ## Tests
 
 ```bash
-.venv/bin/python tests/test_score.py        # 14 checks, no browser
+python3 tests/test_score.py                 # 15 checks, no browser
+python3 tests/test_midi.py                  # 30 checks, no browser
 ```
+
+`test_midi.py` covers full export/import round-trips, a 3/4 score with duplicate
+section names, empty voices and an empty section, notes crossing a section
+boundary, partial imports, filename/marker recovery, overlap and out-of-range
+rejections, and a running-status MIDI reader case.
 
 For the browser test, start the server on port **8199** and headless Chrome:
 
@@ -720,8 +882,10 @@ For the browser test, start the server on port **8199** and headless Chrome:
 It asserts the editor boots, the piano roll renders real SVG geometry, chords
 and arrangement controls exist, notes and tempo commit through `/build`,
 monophonic overlaps are correctly rejected, undo/redo works, audition runs, and
-invalid ABC surfaces a readable error. It also writes
-`docs/screenshot.png`.
+invalid ABC surfaces a readable error. It also exports one MIDI file per section
+through the real UI, imports it back (including a renamed file recovered from
+its marker), checks that a non-MIDI file is rejected without changing the score,
+and writes `docs/screenshot.png`.
 
 ---
 
@@ -733,16 +897,26 @@ still happens in ComfyUI (or wherever you run YuE2). The piano roll's Play
 button is a simple synthesizer preview of the melody and chords, not a preview
 of YuE2's finished production.
 
-Not included, matching the upstream node: MIDI import/export, audio
-transcription, and instrument/sound selection (those live in YuE2's style
-prompt).
+Not included, matching the upstream node: audio transcription and
+instrument/sound selection (those live in YuE2's style prompt). MIDI
+import/export **is** included, but only as a note bridge: one file per section,
+with chords, section layout, tempo, meter, and key staying in the ABC. See
+[MIDI round-trip: one file per section](#midi-round-trip-one-file-per-section).
 
-Two further limits worth knowing before you plan around them:
+Further limits worth knowing before you plan around them:
 
 - **One meter for the whole song.** Mid-song `M:` or `K:` changes disable the
   piano roll. See [Scores with meter or key changes](#scores-with-meter-or-key-changes).
 - **Two monophonic voices, no bass or chord voice.** Harmony is expressed
   through chord symbols and slash chords. See [Harmony: chords and bass](#harmony-chords-and-bass).
+- **MIDI is notes-only and grid-quantized.** Timing is snapped to 1/32 notes
+  (or the score's finer `L:`), so triplets and swing are approximated; velocity,
+  articulation, lyrics, and instrument choice are not preserved. The ABC
+  remains the source of truth, so re-importing a file only replaces notes in its
+  section.
+- **MIDI import is batched.** One import accepts up to 256 files, 8 MB per file
+  and 16 MB in total. A song with more than 256 sections can be imported in
+  batches; every batch leaves the sections it does not name untouched.
 
 ---
 

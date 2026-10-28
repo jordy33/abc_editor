@@ -295,7 +295,114 @@ def main():
     exported = s.eval("""(async()=>{const ed=window.yue2Editor; await fetch('/fl_yue2/score/default').then(r=>r.json()).then(j=>{ed.source=j.score_abc; ed.raw.value=j.score_abc;}); const ok=await ed.validate(); return {ok, len: ed.data.abc.length};})()""", await_promise=True)
     check("restored valid score validates", exported and exported["ok"] is True, str(exported))
 
+    print("\n== MIDI: buttons and limits ==")
+    midi_buttons = s.eval("""(()=>{const ed=window.yue2Editor; return {
+        exportLabel: ed.midiExportButton.textContent,
+        importLabel: ed.midiImportButton.textContent,
+        enabled: !ed.midiExportButton.disabled && !ed.midiImportButton.disabled,
+        multiple: ed.midiFile.multiple,
+        accept: ed.midiFile.accept,
+    };})()""")
+    check("MIDI buttons present", bool(midi_buttons and midi_buttons["exportLabel"] == "Export MIDI"
+          and midi_buttons["importLabel"] == "Import MIDI"), str(midi_buttons))
+    check("MIDI buttons enabled for a valid score", bool(midi_buttons and midi_buttons["enabled"]), str(midi_buttons))
+    check("MIDI import accepts multiple files", bool(midi_buttons and midi_buttons["multiple"]
+          and ".mid" in midi_buttons["accept"] and ".midi" in midi_buttons["accept"]), str(midi_buttons))
+
+    print("\n== MIDI: UI export writes one file per section ==")
+    midi_export = s.eval("""(async()=>{
+        const ed=window.yue2Editor;
+        const written=[];
+        const fake={
+            name:'test-folder',
+            getFileHandle: async (name)=>({
+                createWritable: async ()=>({
+                    write: async (bytes)=>{written.push({
+                        name, size: bytes.length,
+                        magic: String.fromCharCode(...bytes.slice(0,4)),
+                    });},
+                    close: async ()=>{},
+                }),
+            }),
+        };
+        const original=window.showDirectoryPicker;
+        Object.defineProperty(window,'showDirectoryPicker',{value:async()=>fake,configurable:true,writable:true});
+        try { await ed.exportMidi(); }
+        finally {
+            if (original) Object.defineProperty(window,'showDirectoryPicker',{value:original,configurable:true,writable:true});
+            else delete window.showDirectoryPicker;
+        }
+        return {written, sections: ed.data.sections.length,
+                status: document.querySelector('.fl-yue2-editor .status').textContent};
+    })()""", await_promise=True)
+    check("UI export wrote one file per section", bool(midi_export and midi_export["written"]
+          and len(midi_export["written"]) == midi_export["sections"]), str(midi_export))
+    check("UI export wrote SMF files", bool(midi_export)
+          and all(item["magic"] == "MThd" and item["size"] > 0 for item in midi_export["written"]), str(midi_export))
+    check("UI export names keep the numeric prefix", bool(midi_export)
+          and all(item["name"][:2].isdigit() and item["name"].endswith(".mid")
+                  for item in midi_export["written"]), str(midi_export))
+    check("UI export reports the count", bool(midi_export)
+          and "Exported 2 section MIDI files" in midi_export["status"], str(midi_export))
+
+    print("\n== MIDI: UI import round-trip and strictness ==")
+    midi_import = s.eval("""(async()=>{
+        const ed=window.yue2Editor;
+        const response=await fetch('/fl_yue2/score/midi/export',{
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({score_abc:ed.data.abc}),
+        }).then(r=>r.json());
+        const first=response.files[0];
+        const bytes=Uint8Array.from(atob(first.data), c=>c.charCodeAt(0));
+        const before=ed.source;
+        await ed.importMidi([new File([bytes], first.name, {type:'audio/midi'})]);
+        return {name:first.name, same:ed.source===before,
+                status:document.querySelector('.fl-yue2-editor .status').textContent,
+                undo:ed.undo.length};
+    })()""", await_promise=True)
+    check("UI import round-trips a section", bool(midi_import and midi_import["same"]
+          and "Imported 1 section MIDI file" in midi_import["status"]), str(midi_import))
+    check("UI import reports unchanged sections", bool(midi_import)
+          and "1 section unchanged" in midi_import["status"], str(midi_import))
+
+    midi_renamed = s.eval("""(async()=>{
+        const ed=window.yue2Editor;
+        const response=await fetch('/fl_yue2/score/midi/export',{
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({score_abc:ed.data.abc}),
+        }).then(r=>r.json());
+        const first=response.files[0];
+        const bytes=Uint8Array.from(atob(first.data), c=>c.charCodeAt(0));
+        await ed.importMidi([new File([bytes], 'Untitled.mid', {type:'audio/midi'})]);
+        return {status:document.querySelector('.fl-yue2-editor .status').textContent};
+    })()""", await_promise=True)
+    check("UI import recovers a renamed file from its marker", bool(midi_renamed
+          and "1: verse" in midi_renamed["status"]), str(midi_renamed))
+
+    midi_bad = s.eval("""(async()=>{
+        const ed=window.yue2Editor;
+        const before=ed.source;
+        await ed.importMidi([new File([new Uint8Array([1,2,3,4])], 'bad.mid', {type:'audio/midi'})]);
+        return {same:ed.source===before,
+                status:document.querySelector('.fl-yue2-editor .status').textContent,
+                error:document.querySelector('.fl-yue2-editor .status').classList.contains('error')};
+    })()""", await_promise=True)
+    check("UI import rejects a non-MIDI file", bool(midi_bad and midi_bad["error"]
+          and "not a Standard MIDI File" in midi_bad["status"]), str(midi_bad))
+    check("failed import leaves the score untouched", bool(midi_bad and midi_bad["same"]), str(midi_bad))
+
     print("\n== screenshots ==")
+    # Leave the editor in its normal piano-roll view with no error banner.
+    s.eval("""(async()=>{
+        const ed=window.yue2Editor;
+        await fetch('/fl_yue2/score/default').then(r=>r.json()).then(j=>{
+            ed.source=j.score_abc; ed.raw.value=j.score_abc;
+        });
+        await ed.validate();
+        ed.showPiano();
+        return 1;
+    })()""", await_promise=True)
+    time.sleep(1)
     shot = s.send("Page.captureScreenshot", format="png")
     out = Path(__file__).resolve().parent.parent / "docs" / "screenshot.png"
     out.parent.mkdir(exist_ok=True)

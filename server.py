@@ -1,14 +1,17 @@
 """Local HTTP server for the standalone YuE2 ABC editor.
 
-Replaces the two routes the ComfyUI custom node registers on PromptServer:
+Replaces the two routes the ComfyUI custom node registers on PromptServer,
+and adds the editor's one-file-per-section MIDI bridge:
 
-    POST /fl_yue2/score/validate   ->  app.score.inspect_score
-    POST /fl_yue2/score/build      ->  app.score.build_score
+    POST /fl_yue2/score/validate     ->  app.score.inspect_score
+    POST /fl_yue2/score/build        ->  app.score.build_score
+    POST /fl_yue2/score/midi/export  ->  app.midi.export_sections
+    POST /fl_yue2/score/midi/import  ->  app.midi.import_sections
 
-The request/response contract is identical to the ComfyUI node's, so the
-browser code only had to swap `api.fetchApi(path)` for `fetch(path)`. No
-ComfyUI, no torch, no GPU: `abc_score.py` is standard-library only, so this
-whole server is too.
+The request/response contract for the first two is identical to the ComfyUI
+node's, so the browser code only had to swap `api.fetchApi(path)` for
+`fetch(path)`. No ComfyUI, no torch, no GPU: `abc_score.py` and `midi.py` are
+standard-library only, so this whole server is too.
 
 Usage:
     python server.py                 # http://127.0.0.1:8188
@@ -19,16 +22,21 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import webbrowser
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from app.midi import export_sections, import_sections
 from app.score import DEFAULT_SCORE, AbcError, build_score, inspect_score
 
 WEB_ROOT = Path(__file__).resolve().parent / "web"
-MAX_BODY = 8 * 1024 * 1024  # generous headroom over the 200k-char score limit
+# The score limit is 200k characters; the rest is base64-wrapped MIDI. 24 MB
+# covers the 16 MB binary import budget in app/midi.py plus JSON/base64 overhead.
+MAX_BODY = 24 * 1024 * 1024
 
 
 class EditorHandler(SimpleHTTPRequestHandler):
@@ -70,22 +78,55 @@ class EditorHandler(SimpleHTTPRequestHandler):
             raise AbcError("Expected a JSON object.")
         return data
 
-    def _handle(self, action):
-        """Run one score action and report failures the way the node does: 400."""
+    def _run(self, action, malformed="Invalid score document"):
+        """Read JSON, run `action(data)`, and report failures as JSON."""
         try:
-            data = self._read_json()
-            if action is inspect_score:
-                result = inspect_score(data.get("score_abc"))
-            else:
-                result = build_score(data)
-            self._send_json(result)
+            self._send_json(action(self._read_json()))
         except AbcError as error:
             self._send_json({"error": str(error)}, status=400)
         except (KeyError, TypeError) as error:
             # A malformed piano-roll document, e.g. a missing "roll".
-            self._send_json({"error": f"Invalid score document: {error}"}, status=400)
+            self._send_json({"error": f"{malformed}: {error}"}, status=400)
         except Exception as error:  # noqa: BLE001 - surface unexpected faults to the UI
             self._send_json({"error": f"Internal editor error: {error}"}, status=500)
+
+    def _handle(self, action):
+        """Run one score action and report failures the way the node does: 400."""
+        if action is inspect_score:
+            self._run(lambda data: inspect_score(data.get("score_abc")))
+        else:
+            self._run(action)
+
+    def _midi_export(self, data):
+        result = export_sections(data.get("score_abc"))
+        return {
+            "files": [
+                {"name": item["name"],
+                 "data": base64.b64encode(item["bytes"]).decode("ascii"),
+                 "notes": item["notes"],
+                 "bars": item["bars"]}
+                for item in result["files"]
+            ],
+            "summary": result["summary"],
+        }
+
+    def _midi_import(self, data):
+        raw_files = data.get("files")
+        if not isinstance(raw_files, list) or not raw_files:
+            raise AbcError("Select at least one MIDI file to import.")
+        files = []
+        for item in raw_files:
+            if not isinstance(item, dict):
+                raise AbcError("Each MIDI file needs a name and base64 data.")
+            name, encoded = item.get("name"), item.get("data")
+            if not isinstance(name, str) or not isinstance(encoded, str):
+                raise AbcError("Each MIDI file needs a name and base64 data.")
+            try:
+                blob = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError):
+                raise AbcError(f"MIDI file {name!r} is not valid base64.")
+            files.append({"name": name, "data": blob})
+        return import_sections(data.get("score_abc"), files)
 
     def do_POST(self):
         route = self.path.split("?", 1)[0]
@@ -93,6 +134,10 @@ class EditorHandler(SimpleHTTPRequestHandler):
             return self._handle(inspect_score)
         if route == "/fl_yue2/score/build":
             return self._handle(build_score)
+        if route == "/fl_yue2/score/midi/export":
+            return self._run(self._midi_export, "Invalid MIDI export request")
+        if route == "/fl_yue2/score/midi/import":
+            return self._run(self._midi_import, "Invalid MIDI import request")
         self._send_json({"error": f"Unknown endpoint {route}"}, status=404)
 
     def do_GET(self):
