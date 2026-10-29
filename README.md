@@ -116,9 +116,10 @@ python3 -m venv .venv
 **Center notes**, **Instrumental only**, **Clear melody**, **New blank score**,
 and **Advanced ABC** for raw text editing.
 
-**Import ABC / Export ABC** read and write `.abc` files. **Export MIDI /
-Import MIDI** move notes to and from a DAW as one file per section — see
-[MIDI round-trip: one file per section](#midi-round-trip-one-file-per-section).
+**Import ABC / Export ABC** read and write `.abc` files. **Export MusicXML /
+Import MusicXML** move the whole song to and from MuseScore or Logic Pro as one
+two-part score — see
+[MusicXML round-trip: one full-song file](#musicxml-round-trip-one-full-song-file).
 Scores are also saved to your browser automatically, so a refresh does not lose
 work.
 
@@ -180,9 +181,9 @@ and note edits all apply to the selected section and voice only.
    ABC text as you go.
 5. **Export ABC** to write the file back out.
 
-To edit in Logic Pro or MuseScore instead, use **Export MIDI**, edit the
-per-section files, and **Import MIDI**; the ABC is updated in place. See
-[MIDI round-trip: one file per section](#midi-round-trip-one-file-per-section).
+To edit in Logic Pro or MuseScore instead, use **Export MusicXML**, edit the
+full-song file, and **Import MusicXML**; the ABC is updated in place. See
+[MusicXML round-trip: one full-song file](#musicxml-round-trip-one-full-song-file).
 
 If the piano roll is disabled and the status line mentions *key or meter
 changes*, see [Scores with meter or key changes](#scores-with-meter-or-key-changes).
@@ -487,65 +488,71 @@ accepted without complaint. That judgement is yours.
 
 ---
 
-## MIDI round-trip: one file per section
+## MusicXML round-trip: one full-song file
 
-**Export MIDI** writes one Standard MIDI File per ABC section — `01_intro.mid`,
-`02_verse.mid`, `03_chorus.mid`, ... — so Logic Pro, MuseScore, or another DAW
-shows each part as its own region or track. Edit the notes there, then **Import
-MIDI** with the edited files. The ABC stays open in the editor and remains the
-source of truth; only the notes of the sections you import are replaced.
+**Export MusicXML** writes the **whole song** as a single `.musicxml` file with
+two parts, `Vocal` and `Ins`, and one measure per ABC bar. Open it in MuseScore
+or Logic Pro, edit either part, and **Import MusicXML** with the saved file. The
+ABC stays open in the editor and remains the source of truth: the file supplies
+notes, while bars, sections, chords, tempo, meter, and key stay in the ABC.
 
 This is the intended loop:
 
 ```
-YuE2 cover ──▶ .abc ──▶ this editor ──▶ Export MIDI ──▶ edit in Logic/MuseScore
-                ▲                                             │
-                └──────────── Export ABC ◀── Import MIDI ◀────┘
+YuE2 cover ──▶ .abc ──▶ this editor ──▶ Export MusicXML ──▶ edit in MuseScore/Logic
+                ▲                                                  │
+                └──────────── Export ABC ◀── Import MusicXML ◀─────┘
 ```
 
-### What is inside each file
+Because the file covers every bar, an imported score is one continuous piece —
+for a 105-bar song, 105 measures in each part, with explicit rests where a voice
+is silent. No stitching fragments together, unlike the retired per-section MIDI
+bridge.
 
-Every section file contains three tracks:
+### What is inside the file
 
-| Track | Contents |
-| --- | --- |
-| Conductor | Section marker, tempo, time signature, key signature |
-| `Vocal` | The section's vocal notes (MIDI channel 1) |
-| `Ins` | The section's instrumental notes (MIDI channel 2) |
+MusicXML 3.1, `score-partwise`, with 256 divisions per quarter note (one
+division per editor grid tick):
 
-Both voice tracks are always present, even when a voice is empty in that
-section. Tick 0 is the first bar of the section. Track names and internal
-markers carry the section number:
+| Part | Contents | MIDI preview |
+| --- | --- | --- |
+| `Vocal` | The sung line, plus chord symbols, tempo, and section marks | channel 1, Voice Oohs |
+| `Ins` | The instrumental line | channel 2, piano |
 
-```
-YUE2-SECTION 02 verse bars=16 voices=Vocal,Ins
-```
+- Measure 1 of both parts carries the key signature, time signature, and clef.
+- Tempo, `<harmony>` chord symbols, and rehearsal marks (section names) are
+  written in the `Vocal` part only, so the other staff stays clean.
+- Silent areas are explicit rests, including whole-measure rests, so every bar
+  appears in both parts.
+- Notes that cross a barline or a chord change are split into tied segments;
+  importing rejoins them into one note.
+- Durations use standard note values down to 1024th notes, with dots where
+  possible.
 
-The file name is the primary, human-readable key. The embedded marker is the
-safety net: if a DAW renames the file but preserves the marker, the import still
-knows which section it belongs to. A descriptive suffix such as
-`02_chorus copy.mid` is fine when the marker agrees. A disagreement about the
-section **number** is rejected rather than guessed.
-
-Section numbers are **positions**, not permanent IDs. After adding, removing, or
-reordering sections in the ABC, export the MIDI files again before importing any
-older files. The marker's bar count catches many stale arrangements, but not
-all of them.
+The suggested name is `yue2-score.musicxml`. The name does not matter on
+import.
 
 ### Import rules
 
-The loaded ABC defines the song. MIDI files supply notes only:
+The loaded ABC defines the song. The MusicXML file supplies **notes only**, for
+both voices at once:
 
-- **Imported:** note start, duration, and pitch for the matching section.
-- **Not imported:** section order and bar counts, chords, tempo, meter, key,
-  and every other section.
-- **Voices:** files exported here replace both voices in their section. A file
-  with no voice declaration only replaces the voices it actually contains.
-- **Empty tracks:** re-importing an exported file whose voice was emptied in the
-  DAW clears that voice's notes in that section. That is how you delete a part.
-- **Note ownership:** a note belongs to the section where it *starts*. A note
-  that starts in one section and sustains into the next keeps its tail; import
-  the section where it starts to edit it.
+- **Imported:** the start, duration, and pitch of every note in `Vocal` and
+  `Ins`.
+- **Not imported:** bar count and arrangement, section names, chords, tempo,
+  meter, and key. These always come from the ABC.
+- **Replacement:** both voices are replaced by what the file contains. An empty
+  `Ins` part therefore clears the instrumental line — that is how you delete a
+  part.
+- **Unchanged files:** if the imported notes match the ABC exactly, the original
+  ABC is returned byte-for-byte. If you changed notes, the ABC is rebuilt in
+  canonical form (for example `L:` may change and accidentals may be respelled);
+  the notes themselves are exact.
+- **Ties:** tied segments are merged into one note. An unclosed `tie start`, or
+  a `tie stop` with no matching start, is rejected.
+
+An import is a single undo step, so an unwanted one can be reverted with
+**Undo** or <kbd>⌘</kbd>+<kbd>Z</kbd>.
 
 ### Rejections and warnings
 
@@ -553,72 +560,73 @@ The import is deliberately strict; a failed import leaves the score untouched.
 
 | Situation | Result |
 | --- | --- |
-| File has no section number and cannot be matched | **Rejected** |
-| Two files target the same section | **Rejected** |
-| File name says one section, marker says another | **Rejected** |
-| Markers or track names inside one file disagree | **Rejected** |
-| Drum channel 10, or an unnamed track on channel 3+ | **Rejected** |
-| Two notes overlap in one voice | **Rejected**, with section/bar and pitches |
-| A note starts after the section's last bar | **Rejected** |
-| MIDI time signature differs from the ABC | **Rejected** (bar alignment would break) |
+| A different number of measures | **Rejected** — the ABC's bar structure must be kept |
+| Pickup measure, or a measure that is short or overfull | **Rejected**, with part and measure |
+| Meter differs from the ABC, or changes mid-song | **Rejected** (bar alignment would break) |
+| `<backup>`, `<chord>`, or a second voice in a part | **Rejected** — YuE2 voices are monophonic |
+| Grace notes, cues, tuplets, transposition, or unpitched notes | **Rejected**, with part and measure |
+| Two notes overlap in one voice | **Rejected**, with the pitches and where it happens |
+| Broken tie chain | **Rejected** |
+| Compressed `.mxl`, or an internal entity declaration | **Rejected** — export uncompressed `.musicxml` |
+| Note below C0 or above G9 | **Rejected** (MusicXML's supported range) |
+| File larger than 16 MB | **Rejected** |
 | Tempo differs | Imported, with a warning; the ABC keeps its BPM |
 | Key signature differs | Imported, with a warning; notes are taken as written |
-| Note is off the 1/32 grid | Imported, quantized, with a warning |
+| Rehearsal marks differ from the ABC sections | Imported, with a warning; the ABC sections win |
 
-To fix a rejection, keep the exported names, or open the file in the DAW and
-correct the named bar/track. Running **Export MIDI** again is the safest reset.
+To fix a rejection, correct the named part and measure in the notation program,
+or use **Export MusicXML** again as a fresh start.
 
-### What MIDI cannot carry
+Parts are recognized by name (`Vocal`/`Voice`/`Melody` versus
+`Ins`/`Inst`/`Instrumental`), then by MIDI channel, then — with a visible
+warning — by order. The file name is never used. MuseScore and Logic sometimes
+rename parts; naming them back to **Vocal** and **Ins** avoids the warning.
 
-MIDI is a note transport, not a score document. These stay in the ABC/editor:
+### What MusicXML cannot carry
+
+MusicXML could carry much more than this bridge writes. The ABC remains
+authoritative for:
 
 - chord symbols (edit them with **`Chords…`**);
 - section names and order;
-- tempo, meter, and key-signature maps (one of each per song).
+- one tempo, meter, and key signature for the whole song.
 
-These are not stored by the editor at all and are dropped on import: velocity,
-articulation, lyrics, and instrument choice. The exported program changes
-(Voice Oohs / piano) are only a DAW preview convention.
+On import, lyrics, slurs, articulations, dynamics, instruments, and transposition
+in the file are ignored or rejected; only note start, duration, and pitch matter.
+The exported programs (Voice Oohs / piano) are only a notation-program preview
+convention.
 
-Timing is quantized to the editor's grid (1/32 notes, or finer if the score
-already uses a finer `L:`). Triplets and swing are approximated. Both YuE2
-voices are monophonic in each direction, so polyphonic DAW tracks are rejected
-instead of being silently reduced.
+Timing is exact when the file's `<divisions>` divides cleanly into the editor
+grid; a duration that cannot be represented exactly is rejected rather than
+rounded. Both YuE2 voices are monophonic in each direction, so polyphonic parts
+are rejected instead of being silently reduced.
 
 ### Suggested workflow
 
-1. Open the `.abc` from YuE2 and click **Export MIDI**.
-2. Choose a folder (Chrome/Edge) or allow the individual downloads.
-3. In Logic/MuseScore, keep each file's name and edit its `Vocal`/`Ins` tracks.
-4. Back in the editor, click **Import MIDI** and select the files you changed
-   (one or all of them). Sections you do not select are untouched.
-5. Fix any reported overlap or meter problem, then **Import MIDI** again.
-6. **Export ABC** and feed that file to YuE2.
+1. Open the `.abc` from YuE2 and click **Export MusicXML**.
+2. Save `yue2-score.musicxml` and open it in MuseScore or Logic Pro.
+3. Edit the `Vocal` and `Ins` staves. Do not change the number of measures, the
+   meter, or the key signature.
+4. Export **uncompressed MusicXML** (`.musicxml` or `.xml`, not `.mxl`).
+5. Back in the editor, click **Import MusicXML** and choose that file.
+6. Fix anything reported (bar count, overlap, unsupported notation) and import
+   again, or press **Undo** to go back.
+7. **Export ABC** and feed that file to YuE2.
 
-For `al_otro_lado_del_mar.abc` the export is:
+For `100años.abc` the export is one file with 105 measures in each part (286
+vocal notes and 66 instrumental notes); for `al_otro_lado_del_mar.abc`, 92
+measures per part. Both re-import byte-for-byte unchanged.
 
-```
-01_intro.mid  02_verse.mid  03_chorus.mid  04_verse.mid
-05_interlude.mid  06_chorus.mid  07_outro.mid
-```
+### Notation-program notes
 
-The repeated `verse`/`chorus` names are safe: the number is the section key, and
-the slug is only for human readability.
-
-### DAW notes
-
-- **Logic Pro:** import each file as a separate project, or use *File > Import*
-  and keep the track names. The conductor track carries the section markers.
-  The exported track names end in `- Vocal` and `- Ins`, which survives a rename
-  that keeps those words.
-- **MuseScore:** *File > Import* the MIDI, edit the two staves, then *File >
-  Export > MIDI*. Keep the original file name. MuseScore may rename the tracks
-  to instrument names; before exporting, name them back to **Vocal** and **Ins**
-  (or keep them on MIDI channels 1 and 2). Track names, `YUE2-VOICE` text, and
-  the original channels are the three ways the import recognizes the voices.
-- If a DAW strips the file name, the embedded `YUE2-SECTION` marker still
-  identifies the section. If it strips the marker too, the import cannot
-  identify the section and deliberately refuses to guess.
+- **MuseScore:** *File > Open* the `.musicxml`, edit, then *File > Export* and
+  choose **Uncompressed MusicXML**. Keep both parts and do not add staves.
+- **Logic Pro:** open the `.musicxml`, edit, and export **MusicXML** (not MIDI).
+  If Logic adds a pickup, tuplets, or a chord voice, the import names the
+  measure that caused the problem instead of guessing.
+- To change notes only, leave tempo, key, meter, section marks, and chord
+  symbols alone. They are ignored on import anyway, but keeping them makes
+  repeated round trips predictable.
 
 ---
 
@@ -713,7 +721,7 @@ abc-editor-standalone/
 ├── app/
 │   ├── abc_score.py      copied verbatim from ComfyUI-FL-YuE2/yue2/
 │   ├── score.py          inspect_score / build_score (ComfyUI removed)
-│   └── midi.py           per-section Standard MIDI File bridge
+│   └── musicxml.py       full-song MusicXML bridge (Vocal + Ins parts)
 ├── web/
 │   ├── index.html        page shell
 │   ├── style.css         editor styles
@@ -721,7 +729,7 @@ abc-editor-standalone/
 │   └── score_editor.js   standalone shell (node plumbing removed)
 ├── tests/
 │   ├── test_score.py     score logic (no browser needed)
-│   ├── test_midi.py      MIDI round-trip and rejection cases
+│   ├── test_musicxml.py  MusicXML export/import and rejection cases
 │   └── browser_check.py  end-to-end via Chrome DevTools Protocol
 ├── server.py             stdlib HTTP server: static files + score endpoints
 ├── run.sh                create venv, then serve
@@ -742,19 +750,21 @@ differs. Compare the two to see exactly what adding a progression changes.
 
 ### Endpoints
 
-Same contract as the ComfyUI node, so the browser code needed only a transport swap:
+The first two routes keep the ComfyUI node's contract, so the browser code
+needed only a transport swap. The MusicXML routes are specific to this editor:
 
 | Method | Path | Body | Returns |
 | --- | --- | --- | --- |
 | `POST` | `/fl_yue2/score/validate` | `{"score_abc": "..."}` | parsed score document |
 | `POST` | `/fl_yue2/score/build` | score document | rebuilt ABC + document |
-| `POST` | `/fl_yue2/score/midi/export` | `{"score_abc": "..."}` | `{"files": [...], "summary": ...}` |
-| `POST` | `/fl_yue2/score/midi/import` | `{"score_abc": "...", "files": [...]}` | rebuilt ABC + `import` summary |
+| `POST` | `/fl_yue2/score/musicxml/export` | `{"score_abc": "...", "name": "..."}` | `{"files": [...], "summary": ...}` |
+| `POST` | `/fl_yue2/score/musicxml/import` | `{"score_abc": "...", "name": "...", "data": "<base64>"}` | rebuilt ABC + `import` summary |
 | `GET` | `/fl_yue2/score/default` | – | `{"score_abc": "..."}` |
 
-MIDI file `data` is base64-encoded in both directions; each file is one section
-with its own `Vocal` and `Ins` tracks. Errors return HTTP 400 with
-`{"error": "..."}`, matching the original routes.
+The MusicXML file `data` is base64-encoded in both directions. The exported
+`files` array has a single item with `name`, `bars`, `parts`, per-voice `notes`,
+and the XML bytes. Errors return HTTP 400 with `{"error": "..."}`, matching the
+original routes.
 
 ---
 
@@ -834,13 +844,13 @@ prompt** there. Style is where instrumentation and production live — the
 editor's chords describe the harmony, and the style prompt describes everything
 else.
 
-### 7. Edit a section in a DAW (optional)
+### 7. Edit the song in a notation program (optional)
 
-If a section needs a different phrase or voicing, click **Export MIDI**, fix
-that section in Logic Pro or MuseScore, then **Import MIDI** with the edited
-file. Only that section's notes change; chords, form, tempo, meter, and key stay
-as they are. Export the ABC and render again. See
-[MIDI round-trip: one file per section](#midi-round-trip-one-file-per-section).
+If the phrases or voicings need work, click **Export MusicXML**, edit the whole
+score in MuseScore or Logic Pro, then **Import MusicXML**. Both voices are
+replaced by the file's notes; chords, form, tempo, meter, and key stay as they
+are. Export the ABC and render again. See
+[MusicXML round-trip: one full-song file](#musicxml-round-trip-one-full-song-file).
 
 ### Iterating
 
@@ -861,13 +871,19 @@ Two habits worth having:
 
 ```bash
 python3 tests/test_score.py                 # 15 checks, no browser
-python3 tests/test_midi.py                  # 30 checks, no browser
+python3 tests/test_musicxml.py              # 27 checks, no browser
 ```
 
-`test_midi.py` covers full export/import round-trips, a 3/4 score with duplicate
-section names, empty voices and an empty section, notes crossing a section
-boundary, partial imports, filename/marker recovery, overlap and out-of-range
-rejections, and a running-status MIDI reader case.
+`test_musicxml.py` covers full-song export (two parts, every measure, explicit
+rests, ties at barlines and chord changes, harmony kinds, section marks, XML
+escaping), exact round-trips for 4/4, 3/4 and 6/8 scores, a note tying across a
+section boundary, byte-for-byte preservation of non-canonical ABC, canonical
+rebuild after changed notes, clearing a voice, `<forward>` and non-256
+`<divisions>`, namespaces and MusicXML 4.0, part recognition by channel and
+order, tempo/key/marker warnings, and rejections for wrong bar counts, meter
+changes, pickups, short or overfull measures, polyphony, tuplets, grace notes,
+broken ties, out-of-range pitches, invalid roots, entities, `.mxl`, oversized
+files, and unsupported export.
 
 For the browser test, start the server on port **8199** and headless Chrome:
 
@@ -882,10 +898,10 @@ For the browser test, start the server on port **8199** and headless Chrome:
 It asserts the editor boots, the piano roll renders real SVG geometry, chords
 and arrangement controls exist, notes and tempo commit through `/build`,
 monophonic overlaps are correctly rejected, undo/redo works, audition runs, and
-invalid ABC surfaces a readable error. It also exports one MIDI file per section
-through the real UI, imports it back (including a renamed file recovered from
-its marker), checks that a non-MIDI file is rejected without changing the score,
-and writes `docs/screenshot.png`.
+invalid ABC surfaces a readable error. It also exports the full song through the
+real MusicXML button (one file, two parts, every measure), imports it back
+(including under a different file name), checks that a non-MusicXML file is
+rejected without changing the score, and writes `docs/screenshot.png`.
 
 ---
 
@@ -898,10 +914,11 @@ button is a simple synthesizer preview of the melody and chords, not a preview
 of YuE2's finished production.
 
 Not included, matching the upstream node: audio transcription and
-instrument/sound selection (those live in YuE2's style prompt). MIDI
-import/export **is** included, but only as a note bridge: one file per section,
-with chords, section layout, tempo, meter, and key staying in the ABC. See
-[MIDI round-trip: one file per section](#midi-round-trip-one-file-per-section).
+instrument/sound selection (those live in YuE2's style prompt). MusicXML
+import/export **is** included, as a full-song note bridge: one file with both
+parts and every bar, while chords, section layout, tempo, meter, and key stay in
+the ABC. See
+[MusicXML round-trip: one full-song file](#musicxml-round-trip-one-full-song-file).
 
 Further limits worth knowing before you plan around them:
 
@@ -909,14 +926,16 @@ Further limits worth knowing before you plan around them:
   piano roll. See [Scores with meter or key changes](#scores-with-meter-or-key-changes).
 - **Two monophonic voices, no bass or chord voice.** Harmony is expressed
   through chord symbols and slash chords. See [Harmony: chords and bass](#harmony-chords-and-bass).
-- **MIDI is notes-only and grid-quantized.** Timing is snapped to 1/32 notes
-  (or the score's finer `L:`), so triplets and swing are approximated; velocity,
-  articulation, lyrics, and instrument choice are not preserved. The ABC
-  remains the source of truth, so re-importing a file only replaces notes in its
-  section.
-- **MIDI import is batched.** One import accepts up to 256 files, 8 MB per file
-  and 16 MB in total. A song with more than 256 sections can be imported in
-  batches; every batch leaves the sections it does not name untouched.
+- **MusicXML is notes-only.** Note start, duration, and pitch make the round
+  trip; velocity, articulation, lyrics, slurs, and instrument choice are not
+  preserved. The ABC remains the source of truth, so importing a file replaces
+  both voices at once.
+- **The file must keep the ABC's bar structure.** Changing the number of
+  measures, the meter, or the key signature in the notation program makes the
+  import fail with a message naming the problem. Pickups, tuplets, grace notes,
+  and polyphonic parts are also rejected rather than approximated.
+- **One import file at a time, up to 16 MB.** There is no batching because the
+  file always covers the whole song.
 
 ---
 

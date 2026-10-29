@@ -1,17 +1,17 @@
 """Local HTTP server for the standalone YuE2 ABC editor.
 
 Replaces the two routes the ComfyUI custom node registers on PromptServer,
-and adds the editor's one-file-per-section MIDI bridge:
+and adds the editor's full-song MusicXML bridge:
 
-    POST /fl_yue2/score/validate     ->  app.score.inspect_score
-    POST /fl_yue2/score/build        ->  app.score.build_score
-    POST /fl_yue2/score/midi/export  ->  app.midi.export_sections
-    POST /fl_yue2/score/midi/import  ->  app.midi.import_sections
+    POST /fl_yue2/score/validate           ->  app.score.inspect_score
+    POST /fl_yue2/score/build              ->  app.score.build_score
+    POST /fl_yue2/score/musicxml/export    ->  app.musicxml.export_song
+    POST /fl_yue2/score/musicxml/import    ->  app.musicxml.import_song
 
 The request/response contract for the first two is identical to the ComfyUI
 node's, so the browser code only had to swap `api.fetchApi(path)` for
-`fetch(path)`. No ComfyUI, no torch, no GPU: `abc_score.py` and `midi.py` are
-standard-library only, so this whole server is too.
+`fetch(path)`. No ComfyUI, no torch, no GPU: `abc_score.py`, `score.py`, and
+`musicxml.py` are standard-library only, so this whole server is too.
 
 Usage:
     python server.py                 # http://127.0.0.1:8188
@@ -30,12 +30,12 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from app.midi import export_sections, import_sections
+from app.musicxml import export_song, import_song
 from app.score import DEFAULT_SCORE, AbcError, build_score, inspect_score
 
 WEB_ROOT = Path(__file__).resolve().parent / "web"
-# The score limit is 200k characters; the rest is base64-wrapped MIDI. 24 MB
-# covers the 16 MB binary import budget in app/midi.py plus JSON/base64 overhead.
+# The score limit is 200k characters; the rest is a 16 MB MusicXML file
+# base64-wrapped (about 21.3 MB) plus JSON overhead.
 MAX_BODY = 24 * 1024 * 1024
 
 
@@ -97,36 +97,32 @@ class EditorHandler(SimpleHTTPRequestHandler):
         else:
             self._run(action)
 
-    def _midi_export(self, data):
-        result = export_sections(data.get("score_abc"))
+    def _musicxml_export(self, data):
+        name = data.get("name")
+        if name is not None and not isinstance(name, str):
+            raise AbcError("The MusicXML file name must be text.")
+        result = export_song(data.get("score_abc"), name)
         return {
             "files": [
                 {"name": item["name"],
-                 "data": base64.b64encode(item["bytes"]).decode("ascii"),
-                 "notes": item["notes"],
-                 "bars": item["bars"]}
+                 "data": base64.b64encode(item["data"]).decode("ascii"),
+                 "bars": item["bars"],
+                 "parts": item["parts"],
+                 "notes": item["notes"]}
                 for item in result["files"]
             ],
             "summary": result["summary"],
         }
 
-    def _midi_import(self, data):
-        raw_files = data.get("files")
-        if not isinstance(raw_files, list) or not raw_files:
-            raise AbcError("Select at least one MIDI file to import.")
-        files = []
-        for item in raw_files:
-            if not isinstance(item, dict):
-                raise AbcError("Each MIDI file needs a name and base64 data.")
-            name, encoded = item.get("name"), item.get("data")
-            if not isinstance(name, str) or not isinstance(encoded, str):
-                raise AbcError("Each MIDI file needs a name and base64 data.")
-            try:
-                blob = base64.b64decode(encoded, validate=True)
-            except (binascii.Error, ValueError):
-                raise AbcError(f"MIDI file {name!r} is not valid base64.")
-            files.append({"name": name, "data": blob})
-        return import_sections(data.get("score_abc"), files)
+    def _musicxml_import(self, data):
+        name, encoded = data.get("name"), data.get("data")
+        if not isinstance(name, str) or not isinstance(encoded, str):
+            raise AbcError("The MusicXML file needs a name and base64 data.")
+        try:
+            blob = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            raise AbcError(f"MusicXML file {name!r} is not valid base64.")
+        return import_song(data.get("score_abc"), blob, name)
 
     def do_POST(self):
         route = self.path.split("?", 1)[0]
@@ -134,10 +130,10 @@ class EditorHandler(SimpleHTTPRequestHandler):
             return self._handle(inspect_score)
         if route == "/fl_yue2/score/build":
             return self._handle(build_score)
-        if route == "/fl_yue2/score/midi/export":
-            return self._run(self._midi_export, "Invalid MIDI export request")
-        if route == "/fl_yue2/score/midi/import":
-            return self._run(self._midi_import, "Invalid MIDI import request")
+        if route == "/fl_yue2/score/musicxml/export":
+            return self._run(self._musicxml_export, "Invalid MusicXML export request")
+        if route == "/fl_yue2/score/musicxml/import":
+            return self._run(self._musicxml_import, "Invalid MusicXML import request")
         self._send_json({"error": f"Unknown endpoint {route}"}, status=404)
 
     def do_GET(self):

@@ -21,10 +21,8 @@ import { PianoRoll, el, button } from "./piano_roll.js";
 
 const STORAGE_KEY = "fl-yue2-abc-editor/score";
 
-// Mirror app/midi.py's limits so the browser can fail fast and clearly.
-const MIDI_MAX_FILES = 256;
-const MIDI_MAX_FILE = 8 * 1024 * 1024;
-const MIDI_MAX_TOTAL = 16 * 1024 * 1024;
+// Mirror app/musicxml.py's limit so the browser can fail fast and clearly.
+const MUSICXML_MAX_FILE = 16 * 1024 * 1024;
 
 function base64ToBytes(text) {
     const binary = atob(text);
@@ -68,8 +66,8 @@ class ScoreEditor {
         button(toolbar, "Advanced ABC", () => { this.roll.pause(); this.piano.hidden = true; this.raw.hidden = false; }, true);
         button(toolbar, "Import ABC", () => this.file.click(), true);
         button(toolbar, "Export ABC", () => this.export(), true);
-        this.midiExportButton = button(toolbar, "Export MIDI", () => this.exportMidi(), true);
-        this.midiImportButton = button(toolbar, "Import MIDI", () => this.midiFile.click(), true);
+        this.xmlExportButton = button(toolbar, "Export MusicXML", () => this.exportMusicXml(), true);
+        this.xmlImportButton = button(toolbar, "Import MusicXML", () => this.xmlFile.click(), true);
         this.undoButton = button(toolbar, "Undo", () => this.restore(false), true);
         this.redoButton = button(toolbar, "Redo", () => this.restore(true), true);
         button(toolbar, "Expand / close", () => this.expand(!this.expanded), true);
@@ -89,15 +87,14 @@ class ScoreEditor {
             if (await this.validate()) { this.showPiano(); }
         };
 
-        this.midiFile = el("input", null, this.content);
-        this.midiFile.type = "file";
-        this.midiFile.accept = ".mid,.midi,audio/midi,audio/x-midi";
-        this.midiFile.multiple = true;
-        this.midiFile.hidden = true;
-        this.midiFile.onchange = async () => {
-            const files = Array.from(this.midiFile.files || []);
-            this.midiFile.value = "";
-            await this.importMidi(files);
+        this.xmlFile = el("input", null, this.content);
+        this.xmlFile.type = "file";
+        this.xmlFile.accept = ".musicxml,.xml,application/vnd.recordare.musicxml+xml,application/xml,text/xml";
+        this.xmlFile.hidden = true;
+        this.xmlFile.onchange = async () => {
+            const file = this.xmlFile.files[0];
+            this.xmlFile.value = "";
+            if (file) await this.importMusicXml(file);
         };
 
         this.message = el("div", "Loading score…", this.content);
@@ -241,8 +238,8 @@ class ScoreEditor {
             if (revision === this.revision) {
                 this.status(error.message, true);
                 this.pianoButton.disabled = true;
-                this.midiExportButton.disabled = true;
-                this.midiImportButton.disabled = true;
+                this.xmlExportButton.disabled = true;
+                this.xmlImportButton.disabled = true;
                 this.piano.hidden = true;
                 this.raw.hidden = false;
             }
@@ -254,8 +251,8 @@ class ScoreEditor {
         this.data = result;
         this.write(result.abc);
         this.pianoButton.disabled = !result.grid_available;
-        this.midiExportButton.disabled = !result.grid_available;
-        this.midiImportButton.disabled = !result.grid_available;
+        this.xmlExportButton.disabled = !result.grid_available;
+        this.xmlImportButton.disabled = !result.grid_available;
         this.status(`${result.bars} bars · ${result.bpm} BPM · about ${Math.round(result.seconds)} seconds`);
         this.undoButton.disabled = !this.undo.length;
         this.redoButton.disabled = !this.redo.length;
@@ -337,120 +334,106 @@ class ScoreEditor {
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
-    async exportMidi() {
+    async exportMusicXml() {
         if (!this.data?.grid_available) {
-            this.status("MIDI export needs a score with a single meter and key.", true);
+            this.status("MusicXML export needs a score with a single meter and key.", true);
             return;
-        }
-        // The folder picker has to run while the click is still a user gesture,
-        // so ask for it before the validation/build round trips.
-        let directory = null;
-        if (window.showDirectoryPicker) {
-            try {
-                directory = await window.showDirectoryPicker({ mode: "readwrite" });
-            } catch (error) {
-                if (error.name === "AbortError") return; // user cancelled
-                directory = null; // fall back to one download per file
-            }
         }
         if (!await this.validate()) return;
         try {
-            const result = await this.request("/fl_yue2/score/midi/export", { score_abc: this.data.abc });
-            const files = (result.files || []).map(item => ({ name: item.name, bytes: base64ToBytes(item.data) }));
-            if (!files.length) throw new Error("The score has no sections to export.");
-            if (directory) {
-                for (const file of files) {
-                    const handle = await directory.getFileHandle(file.name, { create: true });
+            const result = await this.request("/fl_yue2/score/musicxml/export", {
+                score_abc: this.data.abc,
+                name: "yue2-score",
+            });
+            const file = (result.files || [])[0];
+            if (!file) throw new Error("The score produced no MusicXML file.");
+            const bytes = base64ToBytes(file.data);
+            const suggested = /\.musicxml$/i.test(file.name) ? file.name : `${file.name}.musicxml`;
+            const done = `Exported ${this.describeMusicXmlExport(result.summary)}`;
+            if (window.showSaveFilePicker) {
+                try {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: suggested,
+                        types: [{
+                            description: "MusicXML score",
+                            accept: { "application/vnd.recordare.musicxml+xml": [".musicxml", ".xml"] },
+                        }],
+                    });
                     const writable = await handle.createWritable();
-                    await writable.write(file.bytes);
+                    await writable.write(bytes);
                     await writable.close();
-                }
-            } else {
-                for (const file of files) {
-                    const url = URL.createObjectURL(new Blob([file.bytes], { type: "audio/midi" }));
-                    const link = el("a");
-                    link.href = url;
-                    link.download = file.name;
-                    link.click();
-                    setTimeout(() => URL.revokeObjectURL(url), 1500);
-                    await new Promise(resolve => setTimeout(resolve, 300));
+                    this.status(`${done} to ${handle.name}.`);
+                    return;
+                } catch (error) {
+                    if (error.name === "AbortError") return; // user cancelled
                 }
             }
-            const where = directory
-                ? ` to ${directory.name}`
-                : " (one download per section; allow multiple downloads if prompted)";
-            this.status(`Exported ${files.length} section MIDI file${files.length === 1 ? "" : "s"}${where}.`);
+            const url = URL.createObjectURL(new Blob([bytes], { type: "application/vnd.recordare.musicxml+xml" }));
+            const link = el("a");
+            link.href = url;
+            link.download = suggested;
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1500);
+            this.status(`${done}.`);
         } catch (error) {
             this.status(error.message, true);
         }
     }
 
-    async importMidi(files) {
-        files = Array.from(files || []);
-        if (!files.length) return;
+    async importMusicXml(file) {
+        if (!file) return;
         if (!this.data?.grid_available) {
-            this.status("MIDI import needs a score with a single meter and key.", true);
+            this.status("MusicXML import needs a score with a single meter and key.", true);
             return;
         }
-        if (files.length > MIDI_MAX_FILES) {
-            this.status(`Import at most ${MIDI_MAX_FILES} MIDI files at once.`, true);
+        if (!/\.(musicxml|xml)$/i.test(file.name)) {
+            this.status(`"${file.name}" is not a .musicxml or .xml file.`, true);
             return;
         }
-        let total = 0;
-        for (const file of files) {
-            if (!/\.(mid|midi)$/i.test(file.name)) {
-                this.status(`"${file.name}" is not a .mid or .midi file.`, true);
-                return;
-            }
-            if (file.size > MIDI_MAX_FILE) {
-                this.status(`"${file.name}" is larger than 8 MB.`, true);
-                return;
-            }
-            total += file.size;
+        if (file.size > MUSICXML_MAX_FILE) {
+            this.status(`"${file.name}" is larger than 16 MB.`, true);
+            return;
         }
-        if (total > MIDI_MAX_TOTAL) {
-            this.status("The selected MIDI files are larger than 16 MB in total.", true);
+        let encoded;
+        try {
+            encoded = await fileToBase64(file);
+        } catch (error) {
+            this.status(`Could not read ${file.name}: ${error.message}`, true);
             return;
         }
         if (!await this.validate()) return;
-        let payload;
         try {
-            payload = [];
-            for (const file of files) {
-                payload.push({ name: file.name, data: await fileToBase64(file) });
-            }
-        } catch (error) {
-            this.status(`Could not read the MIDI files: ${error.message}`, true);
-            return;
-        }
-        try {
-            const result = await this.request("/fl_yue2/score/midi/import", {
+            const result = await this.request("/fl_yue2/score/musicxml/import", {
                 score_abc: this.data.abc,
-                files: payload,
+                name: file.name,
+                data: encoded,
             });
             this.pushUndo();
             this.accept(result);
-            this.status(this.describeImport(result.import));
+            this.status(this.describeMusicXmlImport(result.import));
         } catch (error) {
             this.status(error.message, true);
         }
     }
 
-    describeImport(summary = {}) {
-        const applied = summary.applied || [];
-        const unchanged = summary.unchanged || [];
+    describeMusicXmlExport(summary = {}) {
+        const notes = summary.notes || {};
+        return `${summary.bars || 0} bars and 2 parts `
+            + `(Vocal ${notes.Vocal || 0} notes, Ins ${notes.Ins || 0} notes)`;
+    }
+
+    describeMusicXmlImport(summary = {}) {
+        const notes = summary.notes || {};
         const warnings = summary.warnings || [];
-        const names = applied.map(item => `${item.section}: ${item.name}`).join(", ");
-        let text = `Imported ${applied.length} section MIDI file${applied.length === 1 ? "" : "s"}`;
-        if (names) text += ` (${names})`;
-        text += ".";
-        if (unchanged.length) {
-            text += ` ${unchanged.length} section${unchanged.length === 1 ? "" : "s"} unchanged.`;
-        }
+        const name = summary.file || "the MusicXML file";
+        const detail = `${summary.bars || 0} bars; Vocal ${notes.Vocal || 0} notes, Ins ${notes.Ins || 0} notes`;
+        let text = summary.unchanged
+            ? `Re-imported ${name} with no note changes (${detail}).`
+            : `Imported ${name} (${detail}). The ABC keeps its tempo, key, chords, and sections.`;
         if (warnings.length) {
             text += " " + warnings.slice(0, 2).join(" ");
             if (warnings.length > 2) text += ` (+${warnings.length - 2} more; see the browser console)`;
-            console.info("MIDI import warnings:", warnings);
+            console.info("MusicXML import warnings:", warnings);
         }
         return text;
     }

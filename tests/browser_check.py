@@ -295,101 +295,101 @@ def main():
     exported = s.eval("""(async()=>{const ed=window.yue2Editor; await fetch('/fl_yue2/score/default').then(r=>r.json()).then(j=>{ed.source=j.score_abc; ed.raw.value=j.score_abc;}); const ok=await ed.validate(); return {ok, len: ed.data.abc.length};})()""", await_promise=True)
     check("restored valid score validates", exported and exported["ok"] is True, str(exported))
 
-    print("\n== MIDI: buttons and limits ==")
-    midi_buttons = s.eval("""(()=>{const ed=window.yue2Editor; return {
-        exportLabel: ed.midiExportButton.textContent,
-        importLabel: ed.midiImportButton.textContent,
-        enabled: !ed.midiExportButton.disabled && !ed.midiImportButton.disabled,
-        multiple: ed.midiFile.multiple,
-        accept: ed.midiFile.accept,
+    print("\n== MusicXML: buttons and limits ==")
+    xml_buttons = s.eval("""(()=>{const ed=window.yue2Editor; return {
+        exportLabel: ed.xmlExportButton.textContent,
+        importLabel: ed.xmlImportButton.textContent,
+        enabled: !ed.xmlExportButton.disabled && !ed.xmlImportButton.disabled,
+        multiple: ed.xmlFile.multiple,
+        accept: ed.xmlFile.accept,
     };})()""")
-    check("MIDI buttons present", bool(midi_buttons and midi_buttons["exportLabel"] == "Export MIDI"
-          and midi_buttons["importLabel"] == "Import MIDI"), str(midi_buttons))
-    check("MIDI buttons enabled for a valid score", bool(midi_buttons and midi_buttons["enabled"]), str(midi_buttons))
-    check("MIDI import accepts multiple files", bool(midi_buttons and midi_buttons["multiple"]
-          and ".mid" in midi_buttons["accept"] and ".midi" in midi_buttons["accept"]), str(midi_buttons))
+    check("MusicXML buttons present", bool(xml_buttons and xml_buttons["exportLabel"] == "Export MusicXML"
+          and xml_buttons["importLabel"] == "Import MusicXML"), str(xml_buttons))
+    check("MusicXML buttons enabled for a valid score", bool(xml_buttons and xml_buttons["enabled"]), str(xml_buttons))
+    check("MusicXML import takes a single .musicxml file", bool(xml_buttons and not xml_buttons["multiple"]
+          and ".musicxml" in xml_buttons["accept"]), str(xml_buttons))
 
-    print("\n== MIDI: UI export writes one file per section ==")
-    midi_export = s.eval("""(async()=>{
+    print("\n== MusicXML: UI export writes the whole song ==")
+    xml_export = s.eval("""(async()=>{
         const ed=window.yue2Editor;
         const written=[];
         const fake={
-            name:'test-folder',
-            getFileHandle: async (name)=>({
-                createWritable: async ()=>({
-                    write: async (bytes)=>{written.push({
-                        name, size: bytes.length,
-                        magic: String.fromCharCode(...bytes.slice(0,4)),
-                    });},
-                    close: async ()=>{},
-                }),
+            name:'yue2-score.musicxml',
+            createWritable: async ()=>({
+                write: async (bytes)=>{written.push(new TextDecoder().decode(bytes));},
+                close: async ()=>{},
             }),
         };
-        const original=window.showDirectoryPicker;
-        Object.defineProperty(window,'showDirectoryPicker',{value:async()=>fake,configurable:true,writable:true});
-        try { await ed.exportMidi(); }
+        const original=window.showSaveFilePicker;
+        Object.defineProperty(window,'showSaveFilePicker',{value:async()=>fake,configurable:true,writable:true});
+        try { await ed.exportMusicXml(); }
         finally {
-            if (original) Object.defineProperty(window,'showDirectoryPicker',{value:original,configurable:true,writable:true});
-            else delete window.showDirectoryPicker;
+            if (original) Object.defineProperty(window,'showSaveFilePicker',{value:original,configurable:true,writable:true});
+            else delete window.showSaveFilePicker;
         }
-        return {written, sections: ed.data.sections.length,
-                status: document.querySelector('.fl-yue2-editor .status').textContent};
+        const text=written[0]||'';
+        return {count:written.length, size:text.length,
+                xml:text.startsWith('<?xml'),
+                partwise:text.includes('<score-partwise'),
+                parts:(text.match(/<score-part /g)||[]).length,
+                measures:(text.match(/<measure /g)||[]).length,
+                expected:ed.data.bars*2,
+                status:document.querySelector('.fl-yue2-editor .status').textContent};
     })()""", await_promise=True)
-    check("UI export wrote one file per section", bool(midi_export and midi_export["written"]
-          and len(midi_export["written"]) == midi_export["sections"]), str(midi_export))
-    check("UI export wrote SMF files", bool(midi_export)
-          and all(item["magic"] == "MThd" and item["size"] > 0 for item in midi_export["written"]), str(midi_export))
-    check("UI export names keep the numeric prefix", bool(midi_export)
-          and all(item["name"][:2].isdigit() and item["name"].endswith(".mid")
-                  for item in midi_export["written"]), str(midi_export))
-    check("UI export reports the count", bool(midi_export)
-          and "Exported 2 section MIDI files" in midi_export["status"], str(midi_export))
+    check("UI export writes one MusicXML file", bool(xml_export and xml_export["count"] == 1
+          and xml_export["size"] > 0), str(xml_export))
+    check("UI export writes well-formed MusicXML", bool(xml_export and xml_export["xml"]
+          and xml_export["partwise"] and xml_export["parts"] == 2), str(xml_export))
+    check("UI export covers every bar in both parts", bool(xml_export
+          and xml_export["measures"] == xml_export["expected"]), str(xml_export))
+    check("UI export reports bars and parts", bool(xml_export)
+          and "8 bars and 2 parts" in xml_export["status"], str(xml_export))
 
-    print("\n== MIDI: UI import round-trip and strictness ==")
-    midi_import = s.eval("""(async()=>{
+    print("\n== MusicXML: UI import round-trip and strictness ==")
+    xml_import = s.eval("""(async()=>{
         const ed=window.yue2Editor;
-        const response=await fetch('/fl_yue2/score/midi/export',{
+        const response=await fetch('/fl_yue2/score/musicxml/export',{
             method:'POST', headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({score_abc:ed.data.abc}),
+            body:JSON.stringify({score_abc:ed.data.abc, name:'yue2-score'}),
         }).then(r=>r.json());
         const first=response.files[0];
         const bytes=Uint8Array.from(atob(first.data), c=>c.charCodeAt(0));
         const before=ed.source;
-        await ed.importMidi([new File([bytes], first.name, {type:'audio/midi'})]);
+        await ed.importMusicXml(new File([bytes], first.name, {type:'application/vnd.recordare.musicxml+xml'}));
         return {name:first.name, same:ed.source===before,
                 status:document.querySelector('.fl-yue2-editor .status').textContent,
+                error:document.querySelector('.fl-yue2-editor .status').classList.contains('error'),
                 undo:ed.undo.length};
     })()""", await_promise=True)
-    check("UI import round-trips a section", bool(midi_import and midi_import["same"]
-          and "Imported 1 section MIDI file" in midi_import["status"]), str(midi_import))
-    check("UI import reports unchanged sections", bool(midi_import)
-          and "1 section unchanged" in midi_import["status"], str(midi_import))
+    check("UI import round-trips the full song", bool(xml_import and xml_import["same"]
+          and "no note changes" in xml_import["status"]), str(xml_import))
+    check("UI import reports bars and per-voice notes", bool(xml_import
+          and "8 bars; Vocal" in xml_import["status"] and "Ins" in xml_import["status"]), str(xml_import))
 
-    midi_renamed = s.eval("""(async()=>{
+    xml_renamed = s.eval("""(async()=>{
         const ed=window.yue2Editor;
-        const response=await fetch('/fl_yue2/score/midi/export',{
+        const response=await fetch('/fl_yue2/score/musicxml/export',{
             method:'POST', headers:{'Content-Type':'application/json'},
             body:JSON.stringify({score_abc:ed.data.abc}),
         }).then(r=>r.json());
-        const first=response.files[0];
-        const bytes=Uint8Array.from(atob(first.data), c=>c.charCodeAt(0));
-        await ed.importMidi([new File([bytes], 'Untitled.mid', {type:'audio/midi'})]);
+        const bytes=Uint8Array.from(atob(response.files[0].data), c=>c.charCodeAt(0));
+        await ed.importMusicXml(new File([bytes], 'Untitled.musicxml', {type:'application/xml'}));
         return {status:document.querySelector('.fl-yue2-editor .status').textContent};
     })()""", await_promise=True)
-    check("UI import recovers a renamed file from its marker", bool(midi_renamed
-          and "1: verse" in midi_renamed["status"]), str(midi_renamed))
+    check("UI import does not depend on the file name", bool(xml_renamed
+          and "Untitled.musicxml" in xml_renamed["status"]), str(xml_renamed))
 
-    midi_bad = s.eval("""(async()=>{
+    xml_bad = s.eval("""(async()=>{
         const ed=window.yue2Editor;
         const before=ed.source;
-        await ed.importMidi([new File([new Uint8Array([1,2,3,4])], 'bad.mid', {type:'audio/midi'})]);
+        await ed.importMusicXml(new File(['<not-musicxml/>'], 'bad.musicxml', {type:'application/xml'}));
         return {same:ed.source===before,
                 status:document.querySelector('.fl-yue2-editor .status').textContent,
                 error:document.querySelector('.fl-yue2-editor .status').classList.contains('error')};
     })()""", await_promise=True)
-    check("UI import rejects a non-MIDI file", bool(midi_bad and midi_bad["error"]
-          and "not a Standard MIDI File" in midi_bad["status"]), str(midi_bad))
-    check("failed import leaves the score untouched", bool(midi_bad and midi_bad["same"]), str(midi_bad))
+    check("UI import rejects a non-MusicXML file", bool(xml_bad and xml_bad["error"]
+          and "not a MusicXML score" in xml_bad["status"]), str(xml_bad))
+    check("failed import leaves the score untouched", bool(xml_bad and xml_bad["same"]), str(xml_bad))
 
     print("\n== screenshots ==")
     # Leave the editor in its normal piano-roll view with no error banner.
