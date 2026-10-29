@@ -5,13 +5,22 @@
 #   ./run.sh --port 9000
 #   ./run.sh --no-browser
 #
-# Creates .venv on first run and installs requirements.txt.
+# Creates .venv on first run, rebuilds it if its Python disappears, and
+# installs requirements.txt.
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-if [ ! -d .venv ]; then
-    echo "Creating virtual environment…"
+# A venv keeps a symlink to the interpreter it was built with. Upgrading or
+# removing that Python (common with Homebrew) leaves .venv/bin/python dangling,
+# so check that it actually runs and rebuild the venv if it does not.
+if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c "" >/dev/null 2>&1; then
+    if [ -d .venv ]; then
+        echo "Rebuilding virtual environment (its Python is no longer available)…"
+        rm -rf .venv
+    else
+        echo "Creating virtual environment…"
+    fi
     python3 -m venv .venv
 fi
 
