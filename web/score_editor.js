@@ -21,6 +21,26 @@ import { PianoRoll, el, button } from "./piano_roll.js";
 
 const STORAGE_KEY = "fl-yue2-abc-editor/score";
 
+// Mirror app/musicxml.py's limit so the browser can fail fast and clearly.
+const MUSICXML_MAX_FILE = 16 * 1024 * 1024;
+
+function base64ToBytes(text) {
+    const binary = atob(text);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+}
+
+async function fileToBase64(file) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let binary = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+}
+
 class ScoreEditor {
     constructor() {
         this.revision = 0;
@@ -46,6 +66,8 @@ class ScoreEditor {
         button(toolbar, "Advanced ABC", () => { this.roll.pause(); this.piano.hidden = true; this.raw.hidden = false; }, true);
         button(toolbar, "Import ABC", () => this.file.click(), true);
         button(toolbar, "Export ABC", () => this.export(), true);
+        this.xmlExportButton = button(toolbar, "Export MusicXML", () => this.exportMusicXml(), true);
+        this.xmlImportButton = button(toolbar, "Import MusicXML", () => this.xmlFile.click(), true);
         this.undoButton = button(toolbar, "Undo", () => this.restore(false), true);
         this.redoButton = button(toolbar, "Redo", () => this.restore(true), true);
         button(toolbar, "Expand / close", () => this.expand(!this.expanded), true);
@@ -63,6 +85,16 @@ class ScoreEditor {
             this.pushUndo();
             this.write(text);
             if (await this.validate()) { this.showPiano(); }
+        };
+
+        this.xmlFile = el("input", null, this.content);
+        this.xmlFile.type = "file";
+        this.xmlFile.accept = ".musicxml,.xml,application/vnd.recordare.musicxml+xml,application/xml,text/xml";
+        this.xmlFile.hidden = true;
+        this.xmlFile.onchange = async () => {
+            const file = this.xmlFile.files[0];
+            this.xmlFile.value = "";
+            if (file) await this.importMusicXml(file);
         };
 
         this.message = el("div", "Loading score…", this.content);
@@ -206,6 +238,8 @@ class ScoreEditor {
             if (revision === this.revision) {
                 this.status(error.message, true);
                 this.pianoButton.disabled = true;
+                this.xmlExportButton.disabled = true;
+                this.xmlImportButton.disabled = true;
                 this.piano.hidden = true;
                 this.raw.hidden = false;
             }
@@ -217,6 +251,8 @@ class ScoreEditor {
         this.data = result;
         this.write(result.abc);
         this.pianoButton.disabled = !result.grid_available;
+        this.xmlExportButton.disabled = !result.grid_available;
+        this.xmlImportButton.disabled = !result.grid_available;
         this.status(`${result.bars} bars · ${result.bpm} BPM · about ${Math.round(result.seconds)} seconds`);
         this.undoButton.disabled = !this.undo.length;
         this.redoButton.disabled = !this.redo.length;
@@ -296,6 +332,110 @@ class ScoreEditor {
         link.download = name;
         link.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    async exportMusicXml() {
+        if (!this.data?.grid_available) {
+            this.status("MusicXML export needs a score with a single meter and key.", true);
+            return;
+        }
+        if (!await this.validate()) return;
+        try {
+            const result = await this.request("/fl_yue2/score/musicxml/export", {
+                score_abc: this.data.abc,
+                name: "yue2-score",
+            });
+            const file = (result.files || [])[0];
+            if (!file) throw new Error("The score produced no MusicXML file.");
+            const bytes = base64ToBytes(file.data);
+            const suggested = /\.musicxml$/i.test(file.name) ? file.name : `${file.name}.musicxml`;
+            const done = `Exported ${this.describeMusicXmlExport(result.summary)}`;
+            if (window.showSaveFilePicker) {
+                try {
+                    const handle = await window.showSaveFilePicker({
+                        suggestedName: suggested,
+                        types: [{
+                            description: "MusicXML score",
+                            accept: { "application/vnd.recordare.musicxml+xml": [".musicxml", ".xml"] },
+                        }],
+                    });
+                    const writable = await handle.createWritable();
+                    await writable.write(bytes);
+                    await writable.close();
+                    this.status(`${done} to ${handle.name}.`);
+                    return;
+                } catch (error) {
+                    if (error.name === "AbortError") return; // user cancelled
+                }
+            }
+            const url = URL.createObjectURL(new Blob([bytes], { type: "application/vnd.recordare.musicxml+xml" }));
+            const link = el("a");
+            link.href = url;
+            link.download = suggested;
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1500);
+            this.status(`${done}.`);
+        } catch (error) {
+            this.status(error.message, true);
+        }
+    }
+
+    async importMusicXml(file) {
+        if (!file) return;
+        if (!this.data?.grid_available) {
+            this.status("MusicXML import needs a score with a single meter and key.", true);
+            return;
+        }
+        if (!/\.(musicxml|xml)$/i.test(file.name)) {
+            this.status(`"${file.name}" is not a .musicxml or .xml file.`, true);
+            return;
+        }
+        if (file.size > MUSICXML_MAX_FILE) {
+            this.status(`"${file.name}" is larger than 16 MB.`, true);
+            return;
+        }
+        let encoded;
+        try {
+            encoded = await fileToBase64(file);
+        } catch (error) {
+            this.status(`Could not read ${file.name}: ${error.message}`, true);
+            return;
+        }
+        if (!await this.validate()) return;
+        try {
+            const result = await this.request("/fl_yue2/score/musicxml/import", {
+                score_abc: this.data.abc,
+                name: file.name,
+                data: encoded,
+            });
+            this.pushUndo();
+            this.accept(result);
+            this.status(this.describeMusicXmlImport(result.import));
+        } catch (error) {
+            this.status(error.message, true);
+        }
+    }
+
+    describeMusicXmlExport(summary = {}) {
+        const notes = summary.notes || {};
+        return `${summary.bars || 0} bars and 2 parts `
+            + `(Vocal ${notes.Vocal || 0} notes, Ins ${notes.Ins || 0} notes)`;
+    }
+
+    describeMusicXmlImport(summary = {}) {
+        const notes = summary.notes || {};
+        const warnings = summary.warnings || [];
+        const name = summary.file || "the MusicXML file";
+        const detail = `${summary.bars || 0} bars; Vocal ${notes.Vocal || 0} notes, Ins ${notes.Ins || 0} notes`;
+        let text = summary.unchanged
+            ? `Re-imported ${name} with no note changes (${detail}).`
+            : `Imported ${name} (${detail}). The ABC keeps its tempo, key, chords, and sections.`;
+        if (warnings.length) {
+            text += " " + warnings.slice(0, 2).join(" ");
+            if (warnings.length > 2) text += ` (+${warnings.length - 2} more; see the browser console)`;
+            console.info("MusicXML import warnings:", warnings);
+        }
+        return text;
     }
 }
 

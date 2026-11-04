@@ -1,14 +1,17 @@
 """Local HTTP server for the standalone YuE2 ABC editor.
 
-Replaces the two routes the ComfyUI custom node registers on PromptServer:
+Replaces the two routes the ComfyUI custom node registers on PromptServer,
+and adds the editor's full-song MusicXML bridge:
 
-    POST /fl_yue2/score/validate   ->  app.score.inspect_score
-    POST /fl_yue2/score/build      ->  app.score.build_score
+    POST /fl_yue2/score/validate           ->  app.score.inspect_score
+    POST /fl_yue2/score/build              ->  app.score.build_score
+    POST /fl_yue2/score/musicxml/export    ->  app.musicxml.export_song
+    POST /fl_yue2/score/musicxml/import    ->  app.musicxml.import_song
 
-The request/response contract is identical to the ComfyUI node's, so the
-browser code only had to swap `api.fetchApi(path)` for `fetch(path)`. No
-ComfyUI, no torch, no GPU: `abc_score.py` is standard-library only, so this
-whole server is too.
+The request/response contract for the first two is identical to the ComfyUI
+node's, so the browser code only had to swap `api.fetchApi(path)` for
+`fetch(path)`. No ComfyUI, no torch, no GPU: `abc_score.py`, `score.py`, and
+`musicxml.py` are standard-library only, so this whole server is too.
 
 Usage:
     python server.py                 # http://127.0.0.1:8188
@@ -19,16 +22,21 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import webbrowser
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from app.musicxml import export_song, import_song
 from app.score import DEFAULT_SCORE, AbcError, build_score, inspect_score
 
 WEB_ROOT = Path(__file__).resolve().parent / "web"
-MAX_BODY = 8 * 1024 * 1024  # generous headroom over the 200k-char score limit
+# The score limit is 200k characters; the rest is a 16 MB MusicXML file
+# base64-wrapped (about 21.3 MB) plus JSON overhead.
+MAX_BODY = 24 * 1024 * 1024
 
 
 class EditorHandler(SimpleHTTPRequestHandler):
@@ -70,22 +78,51 @@ class EditorHandler(SimpleHTTPRequestHandler):
             raise AbcError("Expected a JSON object.")
         return data
 
-    def _handle(self, action):
-        """Run one score action and report failures the way the node does: 400."""
+    def _run(self, action, malformed="Invalid score document"):
+        """Read JSON, run `action(data)`, and report failures as JSON."""
         try:
-            data = self._read_json()
-            if action is inspect_score:
-                result = inspect_score(data.get("score_abc"))
-            else:
-                result = build_score(data)
-            self._send_json(result)
+            self._send_json(action(self._read_json()))
         except AbcError as error:
             self._send_json({"error": str(error)}, status=400)
         except (KeyError, TypeError) as error:
             # A malformed piano-roll document, e.g. a missing "roll".
-            self._send_json({"error": f"Invalid score document: {error}"}, status=400)
+            self._send_json({"error": f"{malformed}: {error}"}, status=400)
         except Exception as error:  # noqa: BLE001 - surface unexpected faults to the UI
             self._send_json({"error": f"Internal editor error: {error}"}, status=500)
+
+    def _handle(self, action):
+        """Run one score action and report failures the way the node does: 400."""
+        if action is inspect_score:
+            self._run(lambda data: inspect_score(data.get("score_abc")))
+        else:
+            self._run(action)
+
+    def _musicxml_export(self, data):
+        name = data.get("name")
+        if name is not None and not isinstance(name, str):
+            raise AbcError("The MusicXML file name must be text.")
+        result = export_song(data.get("score_abc"), name)
+        return {
+            "files": [
+                {"name": item["name"],
+                 "data": base64.b64encode(item["data"]).decode("ascii"),
+                 "bars": item["bars"],
+                 "parts": item["parts"],
+                 "notes": item["notes"]}
+                for item in result["files"]
+            ],
+            "summary": result["summary"],
+        }
+
+    def _musicxml_import(self, data):
+        name, encoded = data.get("name"), data.get("data")
+        if not isinstance(name, str) or not isinstance(encoded, str):
+            raise AbcError("The MusicXML file needs a name and base64 data.")
+        try:
+            blob = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            raise AbcError(f"MusicXML file {name!r} is not valid base64.")
+        return import_song(data.get("score_abc"), blob, name)
 
     def do_POST(self):
         route = self.path.split("?", 1)[0]
@@ -93,6 +130,10 @@ class EditorHandler(SimpleHTTPRequestHandler):
             return self._handle(inspect_score)
         if route == "/fl_yue2/score/build":
             return self._handle(build_score)
+        if route == "/fl_yue2/score/musicxml/export":
+            return self._run(self._musicxml_export, "Invalid MusicXML export request")
+        if route == "/fl_yue2/score/musicxml/import":
+            return self._run(self._musicxml_import, "Invalid MusicXML import request")
         self._send_json({"error": f"Unknown endpoint {route}"}, status=404)
 
     def do_GET(self):

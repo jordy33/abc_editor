@@ -295,7 +295,114 @@ def main():
     exported = s.eval("""(async()=>{const ed=window.yue2Editor; await fetch('/fl_yue2/score/default').then(r=>r.json()).then(j=>{ed.source=j.score_abc; ed.raw.value=j.score_abc;}); const ok=await ed.validate(); return {ok, len: ed.data.abc.length};})()""", await_promise=True)
     check("restored valid score validates", exported and exported["ok"] is True, str(exported))
 
+    print("\n== MusicXML: buttons and limits ==")
+    xml_buttons = s.eval("""(()=>{const ed=window.yue2Editor; return {
+        exportLabel: ed.xmlExportButton.textContent,
+        importLabel: ed.xmlImportButton.textContent,
+        enabled: !ed.xmlExportButton.disabled && !ed.xmlImportButton.disabled,
+        multiple: ed.xmlFile.multiple,
+        accept: ed.xmlFile.accept,
+    };})()""")
+    check("MusicXML buttons present", bool(xml_buttons and xml_buttons["exportLabel"] == "Export MusicXML"
+          and xml_buttons["importLabel"] == "Import MusicXML"), str(xml_buttons))
+    check("MusicXML buttons enabled for a valid score", bool(xml_buttons and xml_buttons["enabled"]), str(xml_buttons))
+    check("MusicXML import takes a single .musicxml file", bool(xml_buttons and not xml_buttons["multiple"]
+          and ".musicxml" in xml_buttons["accept"]), str(xml_buttons))
+
+    print("\n== MusicXML: UI export writes the whole song ==")
+    xml_export = s.eval("""(async()=>{
+        const ed=window.yue2Editor;
+        const written=[];
+        const fake={
+            name:'yue2-score.musicxml',
+            createWritable: async ()=>({
+                write: async (bytes)=>{written.push(new TextDecoder().decode(bytes));},
+                close: async ()=>{},
+            }),
+        };
+        const original=window.showSaveFilePicker;
+        Object.defineProperty(window,'showSaveFilePicker',{value:async()=>fake,configurable:true,writable:true});
+        try { await ed.exportMusicXml(); }
+        finally {
+            if (original) Object.defineProperty(window,'showSaveFilePicker',{value:original,configurable:true,writable:true});
+            else delete window.showSaveFilePicker;
+        }
+        const text=written[0]||'';
+        return {count:written.length, size:text.length,
+                xml:text.startsWith('<?xml'),
+                partwise:text.includes('<score-partwise'),
+                parts:(text.match(/<score-part /g)||[]).length,
+                measures:(text.match(/<measure /g)||[]).length,
+                expected:ed.data.bars*2,
+                status:document.querySelector('.fl-yue2-editor .status').textContent};
+    })()""", await_promise=True)
+    check("UI export writes one MusicXML file", bool(xml_export and xml_export["count"] == 1
+          and xml_export["size"] > 0), str(xml_export))
+    check("UI export writes well-formed MusicXML", bool(xml_export and xml_export["xml"]
+          and xml_export["partwise"] and xml_export["parts"] == 2), str(xml_export))
+    check("UI export covers every bar in both parts", bool(xml_export
+          and xml_export["measures"] == xml_export["expected"]), str(xml_export))
+    check("UI export reports bars and parts", bool(xml_export)
+          and "8 bars and 2 parts" in xml_export["status"], str(xml_export))
+
+    print("\n== MusicXML: UI import round-trip and strictness ==")
+    xml_import = s.eval("""(async()=>{
+        const ed=window.yue2Editor;
+        const response=await fetch('/fl_yue2/score/musicxml/export',{
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({score_abc:ed.data.abc, name:'yue2-score'}),
+        }).then(r=>r.json());
+        const first=response.files[0];
+        const bytes=Uint8Array.from(atob(first.data), c=>c.charCodeAt(0));
+        const before=ed.source;
+        await ed.importMusicXml(new File([bytes], first.name, {type:'application/vnd.recordare.musicxml+xml'}));
+        return {name:first.name, same:ed.source===before,
+                status:document.querySelector('.fl-yue2-editor .status').textContent,
+                error:document.querySelector('.fl-yue2-editor .status').classList.contains('error'),
+                undo:ed.undo.length};
+    })()""", await_promise=True)
+    check("UI import round-trips the full song", bool(xml_import and xml_import["same"]
+          and "no note changes" in xml_import["status"]), str(xml_import))
+    check("UI import reports bars and per-voice notes", bool(xml_import
+          and "8 bars; Vocal" in xml_import["status"] and "Ins" in xml_import["status"]), str(xml_import))
+
+    xml_renamed = s.eval("""(async()=>{
+        const ed=window.yue2Editor;
+        const response=await fetch('/fl_yue2/score/musicxml/export',{
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({score_abc:ed.data.abc}),
+        }).then(r=>r.json());
+        const bytes=Uint8Array.from(atob(response.files[0].data), c=>c.charCodeAt(0));
+        await ed.importMusicXml(new File([bytes], 'Untitled.musicxml', {type:'application/xml'}));
+        return {status:document.querySelector('.fl-yue2-editor .status').textContent};
+    })()""", await_promise=True)
+    check("UI import does not depend on the file name", bool(xml_renamed
+          and "Untitled.musicxml" in xml_renamed["status"]), str(xml_renamed))
+
+    xml_bad = s.eval("""(async()=>{
+        const ed=window.yue2Editor;
+        const before=ed.source;
+        await ed.importMusicXml(new File(['<not-musicxml/>'], 'bad.musicxml', {type:'application/xml'}));
+        return {same:ed.source===before,
+                status:document.querySelector('.fl-yue2-editor .status').textContent,
+                error:document.querySelector('.fl-yue2-editor .status').classList.contains('error')};
+    })()""", await_promise=True)
+    check("UI import rejects a non-MusicXML file", bool(xml_bad and xml_bad["error"]
+          and "not a MusicXML score" in xml_bad["status"]), str(xml_bad))
+    check("failed import leaves the score untouched", bool(xml_bad and xml_bad["same"]), str(xml_bad))
+
     print("\n== screenshots ==")
+    # Leave the editor in its normal piano-roll view with no error banner.
+    s.eval("""(async()=>{
+        const ed=window.yue2Editor;
+        await fetch('/fl_yue2/score/default').then(r=>r.json()).then(j=>{
+            ed.source=j.score_abc; ed.raw.value=j.score_abc;
+        });
+        await ed.validate();
+        ed.showPiano();
+        return 1;
+    })()""", await_promise=True)
+    time.sleep(1)
     shot = s.send("Page.captureScreenshot", format="png")
     out = Path(__file__).resolve().parent.parent / "docs" / "screenshot.png"
     out.parent.mkdir(exist_ok=True)
