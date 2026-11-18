@@ -391,6 +391,54 @@ def main():
           and "not a MusicXML score" in xml_bad["status"]), str(xml_bad))
     check("failed import leaves the score untouched", bool(xml_bad and xml_bad["same"]), str(xml_bad))
 
+    print("\n== notation view (Partitura): meter changes stay editable ==")
+    notation = s.eval("""(async()=>{
+        const ed = window.yue2Editor, AE = window.yue2AbcEdit;
+        const fixture = "X:1\\nT:\\nM:4/4\\nL:1/32\\nQ:1/4=125\\n"
+            + 'V: Vocal clef=treble name="Vocal Melody" snm="Vocal"\\n'
+            + 'V: Ins clef=treble name="Ins Melody" snm="Inst."\\nK:G\\n'
+            + "% intro\\nV: Vocal\\nM:1/8\\nZ|\\nV: Ins\\nM:1/8\\nz2g2|\\n"
+            + "% verse\\nV: Vocal\\nM:4/4\\nc16z16|B8B4z16z4|\\nV: Ins\\nM:4/4\\nZ2|\\n";
+        ed.showPane('piano');  // the auto-switch to Partitura applies from the grid pane
+        ed.pushUndo(); ed.write(fixture);
+        const ok = await ed.validate();
+        if (!ok) return {ok, status: document.querySelector('.fl-yue2-editor .status').textContent};
+        const out = {ok, grid: ed.data.grid_available, pane: ed.pane,
+                     notationEnabled: !ed.notationButton.disabled,
+                     xmlEnabled: !ed.xmlExportButton.disabled && !ed.xmlImportButton.disabled,
+                     svgNotes: document.querySelectorAll('.fl-yue2-notation .abcjs-note').length,
+                     audioWidget: !!document.querySelector('.notation-audio .abcjs-inline-audio')};
+        // Oracle: re-emitting every bar must be semantically identical.
+        const model = AE.analyze(ed.source);
+        const rebuilt = AE.spliceBars(model, [...model.bars.Vocal, ...model.bars.Ins]);
+        const check = await fetch('/fl_yue2/score/validate', {method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({score_abc: rebuilt})}).then(r=>r.json());
+        out.reEmitSame = JSON.stringify(check.roll) === JSON.stringify(ed.data.roll);
+        // Edit: select c16 (followed by z16) and lengthen it to 24 units.
+        const before = ed.source;
+        const nv = ed.notationView;
+        nv.onClick({el_type:'note', startChar: ed.source.indexOf('c16')});
+        out.selected = !!nv.selection;
+        out.edited = await nv.applyEdit((m, r) => AE.setDuration(m, r, 24));
+        out.text = ed.source.includes('c24-') || ed.source.includes('c24');
+        out.secondsSame = true;
+        await ed.restore(false);
+        out.undone = ed.source === before;
+        return out;
+    })()""", await_promise=True)
+    check("meter-change fixture validates", bool(notation and notation["ok"]), str(notation))
+    if notation and notation["ok"]:
+        check("grid off, Partitura on", notation["grid"] is False and notation["notationEnabled"], str(notation))
+        check("auto-opens the Partitura pane", notation["pane"] == "notation", str(notation))
+        check("MusicXML stays enabled without the grid", notation["xmlEnabled"] is True, str(notation))
+        check("staves engraved", notation["svgNotes"] >= 4, str(notation))
+        check("soundfont audio widget present", notation["audioWidget"] is True, str(notation))
+        check("re-emitting every bar is semantically identical", notation["reEmitSame"] is True, str(notation))
+        check("note selected from the staff", notation["selected"] is True, str(notation))
+        check("lengthen-over-rest edit round-trips", bool(notation["edited"] and notation["text"]), str(notation))
+        check("undo restores the exact source", notation["undone"] is True, str(notation))
+
     print("\n== screenshots ==")
     # Leave the editor in its normal piano-roll view with no error banner.
     s.eval("""(async()=>{

@@ -633,13 +633,14 @@ measures per part. Both re-import byte-for-byte unchanged.
 ## Scores with meter or key changes
 
 If you load a score that changes `M:` (meter) or `K:` (key) **after the
-header**, the piano roll is disabled and you see:
+header**, the piano roll is disabled and the editor opens the **Partitura**
+(sheet-music) view instead, with a status line like:
 
-> Key or meter changes within the song: original notation preserved in Advanced ABC.
+> 97 bars · 125 BPM · about 184 seconds — meter/key changes: shown in Partitura.
 
-**This is not an error.** It is a warning, and it is shown with the normal
-status style — a real error renders with a red bar instead. Your file loaded
-correctly and the text is intact.
+**This is not an error.** Your file loaded correctly, the text is intact, and
+the Partitura view renders and edits it in full — including the odd-meter bars.
+Only the piano-roll *grid* stays unavailable.
 
 ### Why it happens
 
@@ -661,15 +662,17 @@ grid_available = not any(line.startswith(("M:", "K:")) or "[K:" in line for line
 
 ### What still works
 
-| | Piano roll | Advanced ABC |
-| --- | --- | --- |
-| Edit notes with the mouse | ❌ | ❌ |
-| Edit the ABC text | ❌ | ✅ |
-| Load and save `.abc` | ✅ | ✅ |
-| **Send the score to YuE2** | ✅ | ✅ |
+| | Piano roll | Partitura | Advanced ABC |
+| --- | --- | --- | --- |
+| See the score | ❌ | ✅ (engraved staves) | ✅ (text) |
+| Select / edit notes | ❌ | ✅ (click, lengthen, repitch, rest) | ✅ (by hand) |
+| Playback | ❌ | ✅ (General MIDI soundfont, offline) | ❌ |
+| Export / Import MusicXML | ✅ | ✅ (per-bar `<time>` changes) | ✅ |
+| Load and save `.abc` | ✅ | ✅ | ✅ |
+| **Send the score to YuE2** | ✅ | ✅ | ✅ |
 
 **Your music is not lost.** The score parses, the notes are in memory, and YuE2
-accepts the file. You only lose the visual grid.
+accepts the file. Only the uniform piano-roll grid cannot display it.
 
 ### If you want the piano roll anyway
 
@@ -704,13 +707,49 @@ is.
 longer, and every later note shifts by the padding. It is a real edit, not a
 display fix. Do it only when the odd meter is not essential to the arrangement.
 
-If the odd meter *is* musical, the honest answer is to leave the score in
-**Advanced ABC**. It is valid, YuE2 will use it, and you can still edit the
-text by hand.
+If the odd meter *is* musical, keep it and use the **Partitura** view: it reads
+the ABC directly (so a time-signature map is unnecessary), and every edit it
+makes is a validated text splice that leaves each bar's total duration — and
+the whole song's timing — untouched.
 
-> A proper fix would require the grid to model a *list* of bar lengths — a time
-> signature map, as a DAW does. That is a substantial change to both
-> `app/score.py` and `web/piano_roll.js`, not a patch.
+### The Partitura view
+
+**Partitura** renders the score as engraved staves with a vendored copy of
+[abcjs](https://github.com/paulrosen/abcjs) (MIT, `web/vendor/`, no network
+needed). Click a note to select it; the toolbar and keyboard then offer:
+
+- `+` / `−` and the named buttons (16th/8th/1/4/1/2): lengthen into the
+  following rest (ties across barlines as needed) or shorten, freeing the
+  remainder as rest. Lengthening never consumes a following note — use
+  **Merge** to tie into a repeated note of the same pitch.
+- `▲` / `▼` (Shift for octaves): repitch the note, respelled against the key.
+- **Rest/Note** (or Delete): toggle between note and rest.
+- Space: play/pause with the bundled General MIDI piano soundfont
+  (`web/vendor/soundfont/`), which follows meter changes and the `Q:` tempo;
+  the current note is highlighted and a MuseScore-style blue cursor line
+  tracks playback, auto-scrolling to stay in view.
+
+The `% section` names (intro, verse, …) appear as chips above each section's
+first bar. **Import lyrics** loads the song's `[Intro]/[Verse]…` `.txt`
+(display only — the `.abc` never carries lyrics): **Letra** shows each
+section's lines as a hover-to-expand block at the section start, and
+**Sílabas** (experimental) syllabifies the Spanish text (`web/lyrics.js`) and
+distributes it under the Vocal notes via `w:` lines injected only into the
+in-memory copy the renderer sees. That alignment is a visual guess — YuE2
+decides the real phrasing at render time — and an offset map keeps
+click-to-edit exact while it is on.
+
+Every operation re-validates through `/fl_yue2/score/validate` before it
+sticks, and undo (Ctrl+Z) restores the previous text byte-for-byte. The
+semantic engine lives in `web/abc_edit.js`, a browser-side mirror of
+`app/abc_score.py`'s parsing rules (accidental propagation, ties, `Z` rests).
+
+MusicXML export/import also handles these scores: export writes a `<time>`
+change wherever the meter changes, and import validates each measure against
+its own bar length, rebuilding the ABC without touching its structure
+(`M:`/`K:` lines, sections, and grouping survive byte-for-byte). The one
+exception: a score that changes *key* mid-song must have its notes edited in
+Partitura, not through MusicXML import.
 
 ---
 
@@ -726,7 +765,11 @@ abc-editor-standalone/
 │   ├── index.html        page shell
 │   ├── style.css         editor styles
 │   ├── piano_roll.js     byte-identical to ComfyUI-FL-YuE2/web/
-│   └── score_editor.js   standalone shell (node plumbing removed)
+│   ├── score_editor.js   standalone shell (node plumbing removed)
+│   ├── notation_view.js  Partitura: engraved staves, selection, playback
+│   ├── abc_edit.js       semantic text-edit engine (mirror of abc_score.py)
+│   ├── lyrics.js         display-only lyrics: [Tag] parsing, syllabifier, w: injection
+│   └── vendor/           abcjs 6.5.1 (MIT) + GM piano soundfont + audio css
 ├── tests/
 │   ├── test_score.py     score logic (no browser needed)
 │   ├── test_musicxml.py  MusicXML export/import and rejection cases

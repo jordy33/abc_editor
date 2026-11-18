@@ -18,6 +18,7 @@
  */
 
 import { PianoRoll, el, button } from "./piano_roll.js";
+import { NotationView } from "./notation_view.js";
 
 const STORAGE_KEY = "fl-yue2-abc-editor/score";
 
@@ -58,12 +59,13 @@ class ScoreEditor {
         const toolbar = el("div", null, this.content);
         toolbar.className = "row";
         this.pianoButton = button(toolbar, "Piano roll", () => this.showPiano());
+        this.notationButton = button(toolbar, "Partitura", () => this.showPane("notation"));
         button(toolbar, "New blank score", () => this.commit(data => {
             data.roll.tracks = { Vocal: [], Ins: [] };
             data.roll.chords = [];
             data.roll.sections = [{ name: "verse", bars: 4 }];
         }), true);
-        button(toolbar, "Advanced ABC", () => { this.roll.pause(); this.piano.hidden = true; this.raw.hidden = false; }, true);
+        button(toolbar, "Advanced ABC", () => this.showPane("raw"), true);
         button(toolbar, "Import ABC", () => this.file.click(), true);
         button(toolbar, "Export ABC", () => this.export(), true);
         this.xmlExportButton = button(toolbar, "Export MusicXML", () => this.exportMusicXml(), true);
@@ -84,7 +86,9 @@ class ScoreEditor {
             this.file.value = "";
             this.pushUndo();
             this.write(text);
-            if (await this.validate()) { this.showPiano(); }
+            if (await this.validate()) {
+                this.showPane(this.data.grid_available ? "piano" : "notation");
+            }
         };
 
         this.xmlFile = el("input", null, this.content);
@@ -99,8 +103,13 @@ class ScoreEditor {
 
         this.message = el("div", "Loading score…", this.content);
         this.message.className = "status";
+        this.pane = "piano";
         this.piano = el("div", null, this.content);
+        this.piano.className = "piano-pane";
         this.roll = new PianoRoll(this);
+        this.notation = el("div", null, this.content);
+        this.notation.hidden = true;
+        this.notationView = new NotationView(this, this.notation);
         this.raw = el("textarea", null, this.content);
         this.raw.hidden = true;
         this.raw.spellcheck = false;
@@ -113,7 +122,7 @@ class ScoreEditor {
             clearTimeout(this.timer);
             this.timer = setTimeout(() => this.validate(), 450);
         };
-        el("p", "Preview plays a simple melody sound. This editor only reads and writes ABC notation — it does not generate audio.", this.content).className = "help";
+        el("p", "Piano-roll preview plays a simple melody sound; the Partitura view plays a General MIDI piano. This editor only reads and writes ABC notation — it does not generate the final audio.", this.content).className = "help";
 
         this.observer = new ResizeObserver(() => this.scheduleLayout());
         this.observer.observe(this.content);
@@ -148,14 +157,24 @@ class ScoreEditor {
         this.revision++;
         clearTimeout(this.timer);
         this.roll.stop();
+        this.notationView.stop();
     }
 
     /* -------------------------------------------------------------- keyboard */
 
     onKeyDown(event) {
         if (["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName)) return;
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+            event.preventDefault();
+            this.restore(event.shiftKey);
+            return;
+        }
+        if (this.pane === "notation") {
+            if (this.notationView.onKey(event)) { event.preventDefault(); return; }
+            if (event.key === "Escape") this.expand(false);
+            return;
+        }
         if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); this.roll.deleteNote(); }
-        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); this.restore(event.shiftKey); }
         if (event.code === "Space") { event.preventDefault(); if (!event.repeat) this.roll.togglePlayback(); }
         if (event.key === "Escape") this.expand(false);
         if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) {
@@ -240,7 +259,10 @@ class ScoreEditor {
                 this.pianoButton.disabled = true;
                 this.xmlExportButton.disabled = true;
                 this.xmlImportButton.disabled = true;
+                this.notationButton.disabled = true;
+                this.pane = "raw";
                 this.piano.hidden = true;
+                this.notation.hidden = true;
                 this.raw.hidden = false;
             }
             return false;
@@ -251,23 +273,38 @@ class ScoreEditor {
         this.data = result;
         this.write(result.abc);
         this.pianoButton.disabled = !result.grid_available;
-        this.xmlExportButton.disabled = !result.grid_available;
-        this.xmlImportButton.disabled = !result.grid_available;
+        this.xmlExportButton.disabled = false;
+        this.xmlImportButton.disabled = false;
+        this.notationButton.disabled = false;
         this.status(`${result.bars} bars · ${result.bpm} BPM · about ${Math.round(result.seconds)} seconds`);
         this.undoButton.disabled = !this.undo.length;
         this.redoButton.disabled = !this.redo.length;
-        if (result.grid_available) this.roll.render();
-        else {
-            this.piano.hidden = true;
-            this.raw.hidden = false;
-            this.status("Key or meter changes within the song: original notation preserved in Advanced ABC.");
+        if (!result.grid_available && this.pane === "piano") {
+            // The grid cannot show meter/key changes; the notation view can.
+            this.pane = "notation";
+            this.status(`${result.bars} bars · ${result.bpm} BPM · about ${Math.round(result.seconds)} seconds — meter/key changes: shown in Partitura.`);
         }
+        this.piano.hidden = this.pane !== "piano";
+        this.notation.hidden = this.pane !== "notation";
+        this.raw.hidden = this.pane !== "raw";
+        if (result.grid_available) this.roll.render();
+        if (this.pane === "notation") this.notationView.render();
+    }
+
+    showPane(name) {
+        if (name === "piano" && (!this.data || this.pianoButton.disabled)) return;
+        if (name === "notation" && (!this.data || this.notationButton.disabled)) return;
+        this.roll.pause();
+        this.notationView.stop();
+        this.pane = name;
+        this.piano.hidden = name !== "piano";
+        this.notation.hidden = name !== "notation";
+        this.raw.hidden = name !== "raw";
+        if (name === "notation") this.notationView.render();
     }
 
     showPiano() {
-        if (!this.data || this.pianoButton.disabled) return;
-        this.piano.hidden = false;
-        this.raw.hidden = true;
+        this.showPane("piano");
     }
 
     async commit(change) {
@@ -335,10 +372,6 @@ class ScoreEditor {
     }
 
     async exportMusicXml() {
-        if (!this.data?.grid_available) {
-            this.status("MusicXML export needs a score with a single meter and key.", true);
-            return;
-        }
         if (!await this.validate()) return;
         try {
             const result = await this.request("/fl_yue2/score/musicxml/export", {
@@ -382,10 +415,6 @@ class ScoreEditor {
 
     async importMusicXml(file) {
         if (!file) return;
-        if (!this.data?.grid_available) {
-            this.status("MusicXML import needs a score with a single meter and key.", true);
-            return;
-        }
         if (!/\.(musicxml|xml)$/i.test(file.name)) {
             this.status(`"${file.name}" is not a .musicxml or .xml file.`, true);
             return;

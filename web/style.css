@@ -6,9 +6,12 @@
 
 * { box-sizing: border-box; }
 
+html { height: 100%; }
+
 body {
     margin: 0;
-    min-height: 100vh;
+    height: 100%;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
     background: #1c0028;
@@ -30,7 +33,10 @@ body {
 .topbar .hint { color: #d5bfdf; font-size: 12px; }
 .topbar code, .bottombar code { background: #3d1256; padding: 1px 4px; border-radius: 3px; }
 
-main { flex: 1; min-height: 0; }
+/* The page never scrolls as a whole: `main` is the fallback scroll container
+   (piano roll / raw ABC), while the notation pane scrolls only its paper so
+   the toolbars stay pinned like MuseScore's. */
+main { flex: 1; min-height: 0; overflow: auto; }
 
 .bottombar {
     padding: 10px 16px;
@@ -41,10 +47,12 @@ main { flex: 1; min-height: 0; }
 }
 
 /* The editor root must not clip the expanded overlay. */
-#editor { display: block; }
+#editor { display: block; height: 100%; }
 
 .fl-yue2-editor {
     height: 100%;
+    display: flex;
+    flex-direction: column;
     padding: 12px;
     background: #29003d;
     color: #f5edf8;
@@ -52,7 +60,17 @@ main { flex: 1; min-height: 0; }
     border: 1px solid #16727c;
     border-radius: 8px;
 }
-.fl-yue2-content { display: flow-root; }
+.fl-yue2-content {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+.fl-yue2-content > .row,
+.fl-yue2-content > .status,
+.fl-yue2-content > .help,
+.fl-yue2-content > .piano-pane { flex-shrink: 0; }
+.fl-yue2-editor textarea { flex: 1; min-height: 200px; }
 .fl-yue2-editor * { box-sizing: border-box; }
 .fl-yue2-editor .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .fl-yue2-editor label { display: flex; align-items: center; gap: 5px; }
@@ -268,6 +286,89 @@ main { flex: 1; min-height: 0; }
     background: #6b2340 !important;
 }
 .chord-remove:disabled { opacity: .25; cursor: default; }
+
+/* ------------------------------------------------------------ notation view
+   The "Partitura" pane renders engraved staves via the vendored abcjs. The
+   paper keeps a light background regardless of the app theme because the
+   glyphs draw in the pane's currentColor. */
+
+.fl-yue2-notation .notation-toolbar { margin-bottom: 8px; }
+.fl-yue2-notation .notation-info {
+    font-size: 12px;
+    color: #d5bfdf;
+    margin-right: auto;
+    min-width: 180px;
+}
+.fl-yue2-notation .notation-durations { display: inline-flex; gap: 4px; }
+.fl-yue2-notation .notation-toolbar button { padding: 6px 9px; }
+.fl-yue2-notation {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+.fl-yue2-notation .notation-toolbar,
+.fl-yue2-notation .notation-audio { flex-shrink: 0; }
+.fl-yue2-notation .notation-paper {
+    position: relative;
+    flex: 1;
+    min-height: 160px;
+    background: #fdfbf4;
+    color: #221a2e;
+    border: 1px solid #715084;
+    border-radius: 6px;
+    padding: 10px 6px;
+    overflow: auto;
+    overscroll-behavior: contain;
+}
+.fl-yue2-notation .nv-cursor { stroke: #1c7ed6; stroke-width: 2; }
+.fl-yue2-notation .nv-section-label {
+    position: absolute;
+    padding: 1px 7px;
+    border-radius: 9px;
+    background: #16727c;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .4px;
+    text-transform: capitalize;
+    pointer-events: none;
+    z-index: 2;
+    box-shadow: 0 1px 3px #0003;
+}
+.fl-yue2-notation .nv-lyric-block {
+    position: absolute;
+    max-width: 340px;
+    max-height: 1.6em;
+    overflow: hidden;
+    padding: 3px 9px;
+    border-radius: 6px;
+    background: #fffdf2e6;
+    border: 1px solid #16727c55;
+    color: #3b2a4a;
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: pre-line;
+    z-index: 2;
+    box-shadow: 0 2px 6px #0002;
+    cursor: default;
+}
+.fl-yue2-notation .nv-lyric-block:hover {
+    max-height: none;
+    padding: 6px 9px;
+    background: #fffdf2;
+    z-index: 3;
+}
+.fl-yue2-notation button.nv-on { background: #d6336c; }
+.fl-yue2-notation .abcjs-lyric { fill: #553064; }
+.fl-yue2-notation .notation-paper svg { touch-action: auto; user-select: none; }
+.fl-yue2-notation .abcjs-note { cursor: pointer; }
+.fl-yue2-notation .nv-selected,
+.fl-yue2-notation .nv-selected * { fill: #d6336c !important; stroke: #d6336c; }
+.fl-yue2-notation .nv-playing,
+.fl-yue2-notation .nv-playing * { fill: #0b7285 !important; }
+.fl-yue2-notation .notation-audio { margin-bottom: 8px; }
+.fl-yue2-notation .notation-audio[hidden] { display: none; }
 
 /* Expanded mode: an overlay instead of reparenting into document.body. */
 .fl-yue2-editor.fl-yue2-expanded {
