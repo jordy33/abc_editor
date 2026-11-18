@@ -762,12 +762,100 @@ def test_import_rejects_oversized_files():
 def test_export_rejects_unrepresentable_scores():
     export_error(LOW_PITCH, "C0")
     export_error(DEFAULT_SCORE.replace("% verse", "% " + "x" * 101, 1), "Section names")
+
+
+def test_key_change_scores_export_and_reject_note_edits():
     changed = DEFAULT_SCORE.replace('"Am7"z16', '[K:C]"Am7"z16', 1).replace(
         "E2A2c4B2A2G4", "[K:C]E2A2c4B2A2G4", 1)
     info = inspect_score(changed)
     assert info["grid_available"] is False
-    export_error(changed, "single key and meter")
-    expected_error(changed, exported(DEFAULT_SCORE)[1]["data"], "single key and meter")
+    result, file = exported(changed)
+    root = parsed(file["data"])
+    key = elements(root, "key")[0]
+    assert text_of(child(key, "fifths")) == "0"
+    imported = import_song(changed, file["data"], file["name"])
+    assert imported["import"]["unchanged"] is True
+    assert imported["abc"] == info["abc"]
+
+    def repitch(root):
+        child(first_pitch(parts(root)[1]), "octave").text = "5"
+
+    expected_error(changed, mutate(file["data"], repitch), "changes key mid-song")
+
+
+VARIABLE = """X:1
+T:
+M:4/4
+L:1/32
+Q:1/4=125
+V: Vocal clef=treble name="Vocal Melody" snm="Vocal"
+V: Ins clef=treble name="Ins Melody" snm="Inst."
+K:G
+% intro
+V: Vocal
+Z|
+V: Ins
+Z|
+V: Vocal
+M:1/8
+Z|
+V: Ins
+M:1/8
+z2g2|
+V: Vocal
+M:4/4
+c16z16|B8B8z16|
+V: Ins
+M:4/4
+Z2|
+"""
+
+
+def test_variable_meter_export_structure_and_roundtrip():
+    info, result, file, _ = check_roundtrip(VARIABLE)
+    assert info["grid_available"] is False
+    root = parsed(file["data"])
+    for part in parts(root):
+        ms = measures(part)
+        assert len(ms) == 4
+        times = elements(part, "time")
+        signatures = [(text_of(child(t, "beats")), text_of(child(t, "beat-type"))) for t in times]
+        assert signatures == [("4", "4"), ("1", "8"), ("4", "4")], signatures
+    ins = parts(root)[1]
+    pickup = measures(ins)[1]
+    durations = [int(text_of(child(n, "duration"))) for n in pickup if local(n) == "note"]
+    assert sum(durations) == 128, durations  # 1/8 of a whole note at 256 PPQ
+
+
+def test_variable_meter_import_rebuilds_notes():
+    info, _, file, _ = check_roundtrip(VARIABLE)
+
+    def repitch(root):
+        child(first_pitch(parts(root)[0]), "step").text = "D"  # Vocal c -> d
+
+    imported = import_song(VARIABLE, mutate(file["data"], repitch), "edited.musicxml")
+    assert imported["import"]["unchanged"] is False
+    assert imported["bars"] == info["bars"]
+    assert imported["seconds"] == info["seconds"]
+    assert imported["grid_available"] is False
+    before, after = info["roll"]["tracks"], imported["roll"]["tracks"]
+    assert after["Ins"] == before["Ins"]
+    assert len(after["Vocal"]) == len(before["Vocal"])
+    diffs = [(a, b) for a, b in zip(before["Vocal"], after["Vocal"]) if a != b]
+    assert len(diffs) == 1, diffs
+    a, b = diffs[0]
+    assert a["start"] == b["start"] and a["duration"] == b["duration"] and b["pitch"] == a["pitch"] + 2
+    assert "M:1/8" in imported["abc"] and imported["abc"].count("M:4/4") == 3
+
+
+def test_variable_meter_import_checks_each_measure():
+    _, _, file, _ = check_roundtrip(VARIABLE)
+
+    def meter(root):
+        times = elements(parts(root)[0], "time")
+        child(times[1], "beats").text = "2"  # claim the pickup bar is 2/8
+
+    expected_error(VARIABLE, mutate(file["data"], meter), "at measure 2")
 
 
 def _run():

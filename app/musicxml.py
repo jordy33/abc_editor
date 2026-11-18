@@ -16,11 +16,13 @@ Only standard-library modules are used. See references/abc-editing.md.
 
 from __future__ import annotations
 
+import math
 import re
 import xml.etree.ElementTree as ET
 from fractions import Fraction
 
-from .abc_score import AbcError, CHORD, KEYS, NATURAL, QUALITIES, key_accidentals, meter_value
+from .abc_score import (AbcError, CHORD, DURATIONS, KEYS, NATURAL, QUALITIES,
+                        key_accidentals, meter_value, parse as parse_abc)
 from .score import build_score, inspect_score
 
 ROLL_PPQ = 256
@@ -130,6 +132,36 @@ def _spell(pitch, key):
     return letter, alt, octave
 
 
+def _bar_list(info):
+    """The per-bar grid as `[{"start", "length", "meter", "key"}]` roll ticks.
+
+    For a single-meter score this matches `index * bar_ticks` exactly; for a
+    score with mid-song `M:`/`K:` lines it is the authoritative variable grid
+    that the uniform `bar_ticks` arithmetic cannot describe."""
+    score = parse_abc(info["abc"])
+    voice = score.voices["Vocal"]
+    starts = {bar[0] for bar in voice.bars}
+    for when, _key in voice.keys:
+        if when not in starts and when != voice.time:
+            raise AbcError("A key change inside a bar cannot be written to MusicXML.")
+    bars = []
+    for start_qn, length_qn, meter in voice.bars:
+        start = start_qn * ROLL_PPQ
+        length = length_qn * ROLL_PPQ
+        if start.denominator != 1 or length.denominator != 1:
+            raise AbcError("The score is off the editor's tick grid.")
+        key = next(k for t, k in reversed(voice.keys) if t <= start_qn)
+        bars.append({"start": int(start), "length": int(length), "meter": meter, "key": key})
+    return score, bars
+
+
+def _bar_index(ticks, bar_list):
+    for index in range(len(bar_list) - 1, -1, -1):
+        if bar_list[index]["start"] <= ticks:
+            return index
+    return 0
+
+
 def _xml_text(text):
     return _BAD_XML.sub(" ", str(text))
 
@@ -179,21 +211,21 @@ def export_song(score_abc, name=None):
     if name is not None and not isinstance(name, str):
         raise AbcError("The MusicXML file name must be text.")
     info = inspect_score(score_abc)
-    if not info["grid_available"]:
-        raise AbcError("MusicXML export needs a score with a single key and meter.")
-    build_score(info)  # Preflight: inspect_score accepts some documents build_score rejects.
+    _, bar_list = _bar_list(info)
+    if info["grid_available"]:
+        build_score(info)  # Preflight: inspect_score accepts some documents build_score rejects.
 
     roll = info["roll"]
     sections = roll["sections"]
-    bar_ticks = roll["bar_ticks"]
     bars = info["bars"]
     meter_value(info["meter"])
     for voice in VOICE_ORDER:
         for note in roll["tracks"][voice]:
+            key = bar_list[_bar_index(note["start"], bar_list)]["key"]
             try:
-                _spell(note["pitch"], info["key"])
+                _spell(note["pitch"], key)
             except AbcError as error:
-                where = _section_at(note["start"], sections, bar_ticks)
+                where = _section_at(note["start"], sections, bar_list)
                 raise AbcError(f"{voice}: pitch {note['pitch']} in {where} cannot be written in MusicXML ({error})")
 
     root = ET.Element("score-partwise", {"version": "3.1"})
@@ -220,8 +252,8 @@ def export_song(score_abc, name=None):
         ET.SubElement(midi, "volume").text = "80"
         ET.SubElement(midi, "pan").text = "0"
 
-    root.append(_build_part("P1", "Vocal", info))
-    root.append(_build_part("P2", "Ins", info))
+    root.append(_build_part("P1", "Vocal", info, bar_list))
+    root.append(_build_part("P2", "Ins", info, bar_list))
 
     ET.indent(root, space="  ")
     body = ET.tostring(root, encoding="utf-8", xml_declaration=False)
@@ -251,29 +283,29 @@ def export_song(score_abc, name=None):
     }
 
 
-def _build_part(part_id, voice, info):
+def _build_part(part_id, voice, info, bar_list):
     roll = info["roll"]
     notes = roll["tracks"][voice]
     chords = roll["chords"] if voice == "Vocal" else []
     sections = roll["sections"]
-    bar_ticks = roll["bar_ticks"]
-    bars = info["bars"]
-    key = info["key"]
     section_starts = {section["start"]: (index, section["name"])
                       for index, section in enumerate(sections, 1)}
 
     part = ET.Element("part", {"id": part_id})
-    for index in range(bars):
+    for index, bar in enumerate(bar_list):
         measure = ET.SubElement(part, "measure", {"number": str(index + 1)})
         if index == 0:
-            _attributes(measure, info)
+            _attributes(measure, bar)
             if voice == "Vocal":
                 _tempo(measure, info["bpm"])
+        else:
+            _attribute_changes(measure, bar, bar_list[index - 1])
         if index in section_starts and voice == "Vocal":
             section_index, section_name = section_starts[index]
             _rehearsal(measure, section_name or f"Section {section_index}")
 
-        start, end = index * bar_ticks, (index + 1) * bar_ticks
+        start, end = bar["start"], bar["start"] + bar["length"]
+        key = bar["key"]
         measure_notes = [note for note in notes
                          if note["start"] < end and note["start"] + note["duration"] > start]
         measure_chords = [chord for chord in chords if start <= chord["start"] < end]
@@ -282,7 +314,7 @@ def _build_part(part_id, voice, info):
             for chord in measure_chords:
                 if chord["start"] == start:
                     _harmony(measure, chord["symbol"])
-            _measure_rest(measure, bar_ticks)
+            _measure_rest(measure, bar["length"])
             continue
 
         boundaries = {start, end}
@@ -308,19 +340,40 @@ def _build_part(part_id, voice, info):
     return part
 
 
-def _attributes(measure, info):
+def _attributes(measure, bar):
     attributes = ET.SubElement(measure, "attributes")
     ET.SubElement(attributes, "divisions").text = str(DIVISIONS)
-    key = ET.SubElement(attributes, "key")
-    ET.SubElement(key, "fifths").text = str(KEYS[info["key"]])
-    ET.SubElement(key, "mode").text = "minor" if info["key"].endswith("m") else "major"
-    n, d = meter_value(info["meter"])
-    time = ET.SubElement(attributes, "time")
-    ET.SubElement(time, "beats").text = str(n)
-    ET.SubElement(time, "beat-type").text = str(d)
+    _key_element(attributes, bar["key"])
+    _time_element(attributes, bar["meter"])
     clef = ET.SubElement(attributes, "clef")
     ET.SubElement(clef, "sign").text = "G"
     ET.SubElement(clef, "line").text = "2"
+
+
+def _attribute_changes(measure, bar, previous):
+    """Write `<key>`/`<time>` when the bar's signature differs from the last."""
+    new_key = bar["key"] != previous["key"]
+    new_time = bar["meter"] != previous["meter"]
+    if not new_key and not new_time:
+        return
+    attributes = ET.SubElement(measure, "attributes")
+    if new_key:
+        _key_element(attributes, bar["key"])
+    if new_time:
+        _time_element(attributes, bar["meter"])
+
+
+def _key_element(attributes, key_name):
+    key = ET.SubElement(attributes, "key")
+    ET.SubElement(key, "fifths").text = str(KEYS[key_name])
+    ET.SubElement(key, "mode").text = "minor" if key_name.endswith("m") else "major"
+
+
+def _time_element(attributes, meter):
+    n, d = meter
+    time = ET.SubElement(attributes, "time")
+    ET.SubElement(time, "beats").text = str(n)
+    ET.SubElement(time, "beat-type").text = str(d)
 
 
 def _tempo(measure, bpm):
@@ -408,6 +461,131 @@ def _measure_rest(measure, ticks):
 
 
 # ---------------------------------------------------------------------------
+# Structure-preserving rebuild (variable-meter scores)
+
+
+def _spell_abc(pitch, key):
+    """Letter, alteration and ABC pitch text for `pitch`, like build_score's
+    `spell`: key-signature first, so a note and its tied continuation always
+    get the same letter."""
+    key_alt = key_accidentals(key)
+    sharp_key = KEYS[key] >= 0
+    candidates = []
+    for letter, base in NATURAL.items():
+        for alt in (0, 1, -1):
+            if (base + alt) % 12 == pitch % 12:
+                candidates.append((key_alt[letter] != alt, alt != 0, (alt < 0) == sharp_key, letter, alt))
+    _, _, _, letter, alt = min(candidates)
+    octave = (pitch - alt) // 12 - 1
+    text = letter.lower() + "'" * (octave - 5) if octave >= 5 else letter + "," * (4 - octave)
+    return letter, alt, text
+
+
+def _music_bar_at(tracks, chords, voice, bar, unit):
+    """Serialise one bar of `tracks[voice]` into ABC, like build_score's
+    `music_bar` but on the variable per-bar grid."""
+    start, end = bar["start"], bar["start"] + bar["length"]
+    notes = [note for note in tracks[voice] if note["start"] < end and note["start"] + note["duration"] > start]
+    boundaries = {start, end}
+    for note in notes:
+        boundaries.update((max(start, note["start"]), min(end, note["start"] + note["duration"])))
+    if voice == "Vocal":
+        boundaries.update(t for t in chords if start <= t < end)
+    boundaries = sorted(boundaries)
+    if not notes and not (voice == "Vocal" and any(start <= t < end for t in chords)):
+        return "Z"
+    key = bar["key"]
+    key_alt = key_accidentals(key)
+    local = {}
+    parts = []
+    for a, b in zip(boundaries, boundaries[1:]):
+        if voice == "Vocal" and a in chords:
+            parts.append(f'"{chords[a]}"')
+        note = next((note for note in notes if note["start"] <= a < note["start"] + note["duration"]), None)
+        if (b - a) % unit:
+            raise AbcError(f"{voice}: a note near {_qn_text(a)} is off the score's rhythm grid; "
+                           "quantize it to straight values in the notation program.")
+        remaining = (b - a) // unit
+        continuing = note is not None and note["start"] < a
+        for length in sorted(DURATIONS, reverse=True):
+            while remaining >= length:
+                remaining -= length
+                tied = note is not None and (remaining > 0 or b < note["start"] + note["duration"])
+                if note is None:
+                    token = "z"
+                else:
+                    letter, alt, text = _spell_abc(note["pitch"], key)
+                    token = text
+                    # A tied continuation is written bare: the parser keeps the pitch.
+                    if not continuing and local.get(letter, key_alt[letter]) != alt:
+                        token = {0: "=", 1: "^", -1: "_"}[alt] + text
+                        local[letter] = alt
+                continuing = tied
+                parts.append(token + (str(length) if length != 1 else "") + ("-" if tied else ""))
+    return "".join(parts)
+
+
+def _qn_text(ticks):
+    return f"quarter-note {ticks / ROLL_PPQ:g}"
+
+
+def _rebuild_structured(info, score, tracks, bar_list):
+    """Replace the notes of a variable-meter score without touching its shape.
+
+    `build_score` can only serialise a uniform grid, so here the original ABC's
+    header, section comments, `V:` lines and `M:`/`K:` field lines are kept
+    byte-identical and only the music lines are re-emitted, bar by bar, on the
+    per-bar grid. The result is re-validated by `inspect_score` as usual."""
+    if len(score.voices["Vocal"].keys) > 1:
+        raise AbcError("This score changes key mid-song; edit its notes in the editor's "
+                       "Partitura view instead of importing MusicXML.")
+    text = info["abc"]
+    chords = {}
+    for when, symbol in score.voices["Vocal"].chords:
+        chords[int(when * ROLL_PPQ)] = symbol
+
+    grid = 0
+    for voice in VOICE_ORDER:
+        for note in tracks[voice]:
+            grid = math.gcd(grid, math.gcd(note["start"], note["duration"]))
+    for when in chords:
+        grid = math.gcd(grid, when)
+    for bar in bar_list:
+        grid = math.gcd(grid, math.gcd(bar["start"], bar["length"]))
+    if grid == 0:
+        grid = ROLL_PPQ
+    denominator = max(16, 1024 // (grid & -grid))
+    unit = 1024 // denominator
+
+    lines = text.split("\n")
+    out = list(lines)
+    out[3] = f"L:1/{denominator}"
+    counters = {name: 0 for name in VOICE_ORDER}
+    for line_index in sorted(score.music_lines):
+        voice = score.music_lines[line_index]
+        count = 0
+        for body in lines[line_index][:-1].split("|"):
+            rest = re.fullmatch(r"Z([2-4])?", body.strip())
+            count += int(rest.group(1) or 1) if rest else 1
+        first = counters[voice]
+        counters[voice] += count
+        texts = [_music_bar_at(tracks, chords, voice, bar_list[index], unit)
+                 for index in range(first, first + count)]
+        merged, run = [], 0
+        for bar_text in texts + [None]:
+            if bar_text == "Z":
+                run += 1
+                continue
+            if run:
+                merged.append("Z" if run == 1 else f"Z{run}")
+                run = 0
+            if bar_text is not None:
+                merged.append(bar_text)
+        out[line_index] = "|".join(merged) + "|"
+    return inspect_score("\n".join(out))
+
+
+# ---------------------------------------------------------------------------
 # Import
 
 
@@ -420,8 +598,7 @@ def import_song(score_abc, data, name="song.musicxml"):
     returned untouched (fast path), so exporting and re-importing is lossless.
     """
     info = inspect_score(score_abc)
-    if not info["grid_available"]:
-        raise AbcError("MusicXML import needs a score with a single key and meter.")
+    score, bar_list = _bar_list(info)
     raw = _coerce_bytes(data)
     if len(raw) > MAX_FILE_BYTES:
         raise AbcError(f"The MusicXML file is larger than {MAX_FILE_BYTES // (1024 * 1024)} MB.")
@@ -430,14 +607,14 @@ def import_song(score_abc, data, name="song.musicxml"):
     vocal_part, ins_part, source, warnings = _identify_parts(root, parts, name)
     default_divisions = _default_divisions(root)
 
-    vocal_notes, markers = _parse_part(vocal_part, "Vocal", info, default_divisions, name)
-    ins_notes, _ = _parse_part(ins_part, "Ins", info, default_divisions, name)
+    vocal_notes, markers = _parse_part(vocal_part, "Vocal", info, bar_list, default_divisions, name)
+    ins_notes, _ = _parse_part(ins_part, "Ins", info, bar_list, default_divisions, name)
 
     roll = info["roll"]
     tracks = {"Vocal": sorted(vocal_notes, key=lambda note: note["start"]),
               "Ins": sorted(ins_notes, key=lambda note: note["start"])}
     for voice in VOICE_ORDER:
-        _check_monophonic(tracks[voice], voice, roll["sections"], roll["bar_ticks"], roll["total_ticks"])
+        _check_monophonic(tracks[voice], voice, roll["sections"], bar_list, roll["total_ticks"])
 
     warnings.extend(_tempo_warnings(root, info, name))
     warnings.extend(_key_warnings(root, info, name))
@@ -450,8 +627,10 @@ def import_song(score_abc, data, name="song.musicxml"):
     unchanged = tracks == roll["tracks"]
     if unchanged:
         result = dict(info)
-    else:
+    elif info["grid_available"]:
         result = build_score({**info, "roll": {**roll, "tracks": tracks}})
+    else:
+        result = _rebuild_structured(info, score, tracks, bar_list)
 
     notes = {voice: len(tracks[voice]) for voice in VOICE_ORDER}
     result["import"] = {
@@ -619,14 +798,12 @@ def _measure_divisions(bar_ticks, divisions, name, voice, measure):
     return value.numerator
 
 
-def _parse_part(part, voice, info, default_divisions, name):
+def _parse_part(part, voice, info, bar_list, default_divisions, name):
     measures = _children(part, "measure")
     if len(measures) != info["bars"]:
         raise AbcError(f"MusicXML file {name!r}: the {voice} part has {len(measures)} measure(s), but the score "
                        f"has {info['bars']}. Keep the bar structure when editing.")
-    bar_ticks = info["roll"]["bar_ticks"]
     total = info["roll"]["total_ticks"]
-    expected_meter = meter_value(info["meter"])
     divisions = default_divisions
     open_tie = None
     notes, markers = [], []
@@ -637,7 +814,10 @@ def _parse_part(part, voice, info, default_divisions, name):
             raise AbcError(f"MusicXML file {name!r}: measure {measure_index + 1} of {voice} is a pickup; "
                            "the score uses full measures.")
         cursor, expected = 0, None
-        measure_start = measure_index * bar_ticks
+        entry = bar_list[measure_index]
+        bar_ticks = entry["length"]
+        expected_meter = entry["meter"]
+        measure_start = entry["start"]
 
         for element in measure:
             tag = _local(element.tag)
@@ -674,7 +854,8 @@ def _parse_part(part, voice, info, default_divisions, name):
                                        f"{measure_index + 1} of {voice}.")
                     if (n, d) != expected_meter:
                         raise AbcError(f"MusicXML file {name!r}: {voice} is in {n}/{d}, but the score is "
-                                       f"{info['meter']}. Keep the meter when editing.")
+                                       f"{expected_meter[0]}/{expected_meter[1]} at measure {measure_index + 1}. "
+                                       "Keep the meter when editing.")
                 continue
             if tag == "note":
                 cursor, expected, open_tie = _parse_note(
@@ -911,24 +1092,24 @@ def _key_warnings(root, info, name):
     return []
 
 
-def _section_at(ticks, sections, bar_ticks):
-    bar = ticks // bar_ticks
+def _section_at(ticks, sections, bar_list):
+    bar = _bar_index(ticks, bar_list)
     for index, section in enumerate(sections, 1):
         if section["start"] <= bar < section["start"] + section["bars"]:
             return f"section {index} {section['name']!r}, bar {bar - section['start'] + 1}"
     return f"bar {bar + 1}"
 
 
-def _check_monophonic(notes, voice, sections, bar_ticks, total):
+def _check_monophonic(notes, voice, sections, bar_list, total):
     end, last = 0, None
     for note in notes:
         if note["start"] < end:
-            where = _section_at(note["start"], sections, bar_ticks)
+            where = _section_at(note["start"], sections, bar_list)
             raise AbcError(f"{voice}: notes overlap in {where} (MIDI pitches {last['pitch']} and "
                            f"{note['pitch']}). Each YuE2 voice is monophonic; shorten or remove one of the "
                            "notes in the MusicXML file.")
         if note["start"] + note["duration"] > total:
-            where = _section_at(note["start"], sections, bar_ticks)
+            where = _section_at(note["start"], sections, bar_list)
             raise AbcError(f"{voice}: a note starting in {where} extends past the end of the song.")
         end = note["start"] + note["duration"]
         last = note
