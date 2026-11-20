@@ -20,6 +20,8 @@ const LYRICS_KEY = "fl-yue2-abc-editor/lyrics";
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
+const SVGNS = "http://www.w3.org/2000/svg";
+
 function pitchName(pitch) {
     return NOTE_NAMES[pitch % 12] + (Math.floor(pitch / 12) - 1);
 }
@@ -121,6 +123,7 @@ export class NotationView {
                     this.render();
                 } else {
                     this.placeSectionLabels();
+                    this.placeBarNumbers();
                 }
             });
         });
@@ -252,6 +255,195 @@ export class NotationView {
         this.cursorMs = null;
     }
 
+    /* ------------------------------------ bar numbers & click-to-play */
+
+    /* abcjs system index (abcjs-lN) of an engraved element, read off its
+     * rendered classes — the same source moveCursorLine trusts. */
+    lineNumberOf(elem) {
+        const g = elem.abselem && elem.abselem.elemset && elem.abselem.elemset[0];
+        if (!g) return null;
+        const m = /(?:^|\s)abcjs-l(\d+)(?:\s|$)/.exec(g.getAttribute("class") || "");
+        return m ? parseInt(m[1], 10) : null;
+    }
+
+    barIndexForChar(model, charIndex) {
+        if (typeof charIndex !== "number") return null;
+        for (const name of ["Vocal", "Ins"]) {
+            for (const bar of model.bars[name] || []) {
+                if (charIndex >= bar.charStart && charIndex < bar.charEnd) return bar.index;
+            }
+        }
+        return null;
+    }
+
+    /* One entry per engraved measure: its model bar index plus its x-range
+     * and vertical extent inside the SVG, grouped by system. Measure
+     * boundaries are the engraved barlines; the first measure of a system
+     * starts at the staff's left edge (clef included), MuseScore-style. */
+    buildMeasureGeometry() {
+        this.measures = [];
+        const svg = this.paper.querySelector("svg");
+        if (!svg || !this.visual || !this.visual.lines) return;
+        let model;
+        try { model = this.getModel(); } catch { return; }
+        let nextBarIdx = 0;
+        for (const line of this.visual.lines) {
+            if (!line.staff) continue;
+            const voice = line.staff[0] && line.staff[0].voices && line.staff[0].voices[0];
+            if (!voice || !voice.length) continue;
+            const firstNote = voice.find(e => e.el_type === "note");
+            if (!firstNote) continue;
+            const lineNum = this.lineNumberOf(firstNote);
+            const extent = lineNum === null ? null : this.lineExtent(svg, lineNum);
+            if (!extent) continue;
+            const anchor = this.barIndexForChar(model, this.sourceChar(firstNote.startChar));
+            const start = anchor === null ? nextBarIdx : anchor;
+            const bounds = voice
+                .filter(e => e.el_type === "bar" && e.abselem && Number.isFinite(e.abselem.x))
+                .map(e => e.abselem.x);
+            if (!bounds.length) continue;
+            let left = bounds[0] - 1;
+            const staff = svg.querySelector(`.abcjs-staff.abcjs-l${lineNum}`);
+            if (staff) { try { left = staff.getBBox().x; } catch { /* detached */ } }
+            bounds.forEach((x, j) => {
+                this.measures.push({ lineNum, barIdx: start + j, x0: left, x1: x,
+                                     top: extent.top, bottom: extent.bottom });
+                left = x;
+            });
+            nextBarIdx = start + bounds.length;
+        }
+    }
+
+    /* MuseScore-style measure number above the start of each system.
+     * DOM chips like the section labels, so the engraving and every char
+     * offset stay untouched; clicking one plays from that measure. */
+    placeBarNumbers() {
+        for (const old of this.paper.querySelectorAll(".nv-bar-number")) old.remove();
+        const svg = this.paper.querySelector("svg");
+        if (!svg || !this.measures || !this.measures.length) return;
+        const paperRect = this.paper.getBoundingClientRect();
+        const seen = new Set();
+        for (const m of this.measures) {
+            if (seen.has(m.lineNum)) continue;
+            seen.add(m.lineNum);
+            const staff = svg.querySelector(`.abcjs-staff.abcjs-l${m.lineNum}`);
+            if (!staff) continue;
+            const rect = staff.getBoundingClientRect();
+            const chip = el("div", String(m.barIdx + 1), this.paper);
+            chip.className = "nv-bar-number";
+            chip.title = `Compás ${m.barIdx + 1} — click para reproducir desde aquí`;
+            chip.style.left = `${Math.max(0, rect.left - paperRect.left + this.paper.scrollLeft - 4)}px`;
+            chip.style.top = `${Math.max(0, rect.top - paperRect.top + this.paper.scrollTop - 17)}px`;
+            chip.onclick = (ev) => { ev.stopPropagation(); this.playFromBar(m.barIdx); };
+        }
+    }
+
+    /* Which engraved measure the pointer is over, in SVG user coordinates. */
+    measureAt(ev) {
+        const svg = this.paper.querySelector("svg");
+        if (!svg || !this.measures || !this.measures.length) return null;
+        let p;
+        try {
+            const pt = svg.createSVGPoint();
+            pt.x = ev.clientX;
+            pt.y = ev.clientY;
+            p = pt.matrixTransform(svg.getScreenCTM().inverse());
+        } catch { return null; }
+        return this.measures.find(m =>
+            p.y >= m.top && p.y <= m.bottom && p.x >= m.x0 && p.x < m.x1) || null;
+    }
+
+    attachMeasureHandlers(svg) {
+        svg.addEventListener("click", ev => this.onPaperClick(ev));
+        svg.addEventListener("mousemove", ev => this.hoverMeasure(ev));
+        svg.addEventListener("mouseleave", () => this.hoverMeasure(null));
+    }
+
+    /* Clicking blank measure space seeks playback there; clicking a note or
+     * rest keeps its editing meaning (abcjs' clickListener handles those). */
+    onPaperClick(ev) {
+        if (ev.target.closest && ev.target.closest('[class*="abcjs-note"], [class*="abcjs-rest"]')) return;
+        const m = this.measureAt(ev);
+        if (m) this.playFromBar(m.barIdx);
+    }
+
+    hoverMeasure(ev) {
+        const svg = this.paper.querySelector("svg");
+        if (!svg) return;
+        const overElem = ev && ev.target.closest
+            && ev.target.closest('[class*="abcjs-note"], [class*="abcjs-rest"]');
+        const m = ev && !overElem ? this.measureAt(ev) : null;
+        let group = svg.querySelector(".nv-measure-hover");
+        if (!m) {
+            if (group) group.remove();
+            svg.style.cursor = "";
+            return;
+        }
+        if (!group) {
+            group = document.createElementNS(SVGNS, "g");
+            group.setAttribute("class", "nv-measure-hover");
+            group.appendChild(document.createElementNS(SVGNS, "rect"));
+            group.appendChild(document.createElementNS(SVGNS, "text"));
+            svg.appendChild(group);
+        }
+        const rect = group.querySelector("rect");
+        rect.setAttribute("x", m.x0);
+        rect.setAttribute("y", m.top);
+        rect.setAttribute("width", m.x1 - m.x0);
+        rect.setAttribute("height", m.bottom - m.top);
+        rect.setAttribute("rx", 4);
+        const label = group.querySelector("text");
+        label.textContent = String(m.barIdx + 1);
+        label.setAttribute("x", m.x0 + 4);
+        label.setAttribute("y", m.top + 11);
+        svg.style.cursor = "pointer";
+    }
+
+    /* Jump playback to the start of a measure. Priming (first Play) is what
+     * stamps currentTrackMilliseconds on the engraved notes, so start the
+     * synth first, then seek. */
+    async playFromBar(barIdx) {
+        if (!this.synthControl || !this.visual) return;
+        try {
+            if (!this.synthControl.isStarted) await this.synthControl.play();
+            const ms = this.barStartMs(barIdx);
+            if (ms === null) return;
+            this.synthControl.seek(Math.max(0, ms) / 1000, "seconds");
+            this.editor.status(`Reproduciendo desde el compás ${barIdx + 1}.`);
+        } catch (error) {
+            console.warn("seek:", error);
+        }
+    }
+
+    /* Start time of a measure: the earliest timing abcjs stamped on a note
+     * of that bar in either voice. A measure that is all rests has no
+     * stamped notes; fall back to its whole-note offset times the song's
+     * ms-per-whole-note (the dialect's tempo is constant). */
+    barStartMs(barIdx) {
+        let model;
+        try { model = this.getModel(); } catch { return null; }
+        let best = Infinity;
+        let perWhole = null;
+        for (const elem of this.engravedElements()) {
+            let ms = elem.currentTrackMilliseconds;
+            if (Array.isArray(ms)) ms = ms[0];
+            if (typeof ms !== "number") continue;
+            let wn = elem.currentTrackWholeNotes;
+            if (Array.isArray(wn)) wn = wn[0];
+            if (perWhole === null && typeof wn === "number" && wn > 0 && ms > 0) perWhole = ms / wn;
+            if (ms < best
+                    && this.barIndexForChar(model, this.sourceChar(elem.startChar)) === barIdx) {
+                best = ms;
+            }
+        }
+        if (best < Infinity) return best;
+        const bars = model.bars.Vocal.length ? model.bars.Vocal : model.bars.Ins;
+        if (perWhole === null || barIdx >= bars.length) return null;
+        let whole = 0;
+        for (let i = 0; i < barIdx; i++) whole += bars[i].meter.n / bars[i].meter.d;
+        return perWhole * whole;
+    }
+
     setAudioTune() {
         if (!this.synthControl || !this.visual) return;
         this.synthControl.setTune(this.visual, false, {
@@ -305,9 +497,13 @@ export class NotationView {
         this.paper.style.overflow = "";
         this.paper.style.height = "";
         this.lineExtents = null;  // system geometry changed; recompute lazily
+        this.buildMeasureGeometry();
+        const svg = this.paper.querySelector("svg");
+        if (svg) this.attachMeasureHandlers(svg);
         this.buildNamedDurations();
         this.restoreSelection();
         this.placeSectionLabels();
+        this.placeBarNumbers();
         this.setAudioTune();
         this.paper.scrollTop = scrollTop;
     }
