@@ -238,17 +238,22 @@ def export_song(score_abc, name=None):
         f"bars={bars} meter={info['meter']} key={info['key']} bpm={info['bpm']}")
 
     part_list = ET.SubElement(root, "part-list")
-    for part_id, voice, abbreviation, channel, program in (
-            ("P1", "Vocal", "Voc", "1", "54"),
-            ("P2", "Ins", "Ins", "2", "1")):
+    # Both parts play back as piano (GM program 1); part-name alone carries the
+    # Vocal/Ins identity the importer matches on. instrument-sound is what
+    # MuseScore 4 and Logic read to pick the playback sound, so without it the
+    # Ins part came up as violin or worse depending on the program's defaults.
+    for part_id, voice, abbreviation, channel in (
+            ("P1", "Vocal", "Voc", "1"),
+            ("P2", "Ins", "Ins", "2")):
         score_part = ET.SubElement(part_list, "score-part", {"id": part_id})
         ET.SubElement(score_part, "part-name").text = voice
         ET.SubElement(score_part, "part-abbreviation").text = abbreviation
         instrument = ET.SubElement(score_part, "score-instrument", {"id": f"{part_id}-I1"})
-        ET.SubElement(instrument, "instrument-name").text = voice
+        ET.SubElement(instrument, "instrument-name").text = "Piano"
+        ET.SubElement(instrument, "instrument-sound").text = "keyboard.piano"
         midi = ET.SubElement(score_part, "midi-instrument", {"id": f"{part_id}-I1"})
         ET.SubElement(midi, "midi-channel").text = channel
-        ET.SubElement(midi, "midi-program").text = program
+        ET.SubElement(midi, "midi-program").text = "1"
         ET.SubElement(midi, "volume").text = "80"
         ET.SubElement(midi, "pan").text = "0"
 
